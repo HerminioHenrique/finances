@@ -10,7 +10,7 @@
     import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
     import { getFirestore, collection, doc, setDoc, getDoc, getDocs, deleteDoc, query, where, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
 
-    // CONFIGURAÇÃO FIREBASE - COLOQUE SUAS CREDENCIAIS AQUI
+    // CONFIGURAÇÃO FIREBASE
     const firebaseConfig = {
       apiKey: "AIzaSyBaxFfjgpAVbGpCR7VF-9RoBmKf0-rX6BU",
       authDomain: "finances-6710b.firebaseapp.com",
@@ -25,6 +25,94 @@
     const db = getFirestore(app);
 
     let currentUser = null;
+
+    // ============= UTILS: CURRENCY & LOCALE =============
+    const CURRENCY_MAP = {
+      'GBP': { locale: 'en-GB', currency: 'GBP', symbol: '£' },
+      'BRL': { locale: 'pt-BR', currency: 'BRL', symbol: 'R$' },
+      'EUR': { locale: 'pt-PT', currency: 'EUR', symbol: '€' },
+      'USD': { locale: 'en-US', currency: 'USD', symbol: '$' }
+    };
+
+    function detectCurrency() {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz.includes('London') || tz.includes('Dublin') || tz.includes('Belfast')) return 'GBP';
+      if (tz.includes('Sao_Paulo') || tz.includes('Brazil') || tz.includes('America/Sao_Paulo')) return 'BRL';
+      if (tz.includes('Lisbon') || tz.includes('Paris') || tz.includes('Berlin') || tz.includes('Europe')) return 'EUR';
+      return 'GBP'; // Default
+    }
+
+    window.formatMoney = (value) => {
+      const config = CURRENCY_MAP[window.appData.currency] || CURRENCY_MAP['GBP'];
+      return new Intl.NumberFormat(config.locale, {
+        style: 'currency',
+        currency: config.currency
+      }).format(value);
+    };
+
+    // ============= NOTIFICATION SYSTEM =============
+    window.showToast = (message, type = 'info') => {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      
+      const colors = type === 'error' ? 'bg-red-600' : type === 'success' ? 'bg-green-600' : 'bg-blue-600';
+      
+      toast.className = `${colors} text-white px-6 py-3 rounded-lg shadow-xl mb-3 transform transition-all duration-300 translate-x-full opacity-0 flex items-center gap-2`;
+      toast.innerHTML = `<span>${message}</span>`;
+      
+      container.appendChild(toast);
+      
+      requestAnimationFrame(() => {
+        toast.classList.remove('translate-x-full', 'opacity-0');
+      });
+
+      setTimeout(() => {
+        toast.classList.add('translate-x-full', 'opacity-0');
+        setTimeout(() => container.removeChild(toast), 300);
+      }, 3000);
+    };
+
+    // ============= MODAL CONFIRM SYSTEM =============
+    window.confirmCallback = null;
+    window.showConfirm = (message, onConfirm) => {
+      const modal = document.getElementById('confirmModal');
+      document.getElementById('confirmMessage').textContent = message;
+      modal.classList.remove('hidden');
+      window.confirmCallback = onConfirm;
+    };
+
+    window.handleConfirmYes = () => {
+      if (window.confirmCallback) window.confirmCallback();
+      window.hideConfirm();
+    };
+
+    window.hideConfirm = () => {
+      document.getElementById('confirmModal').classList.add('hidden');
+      window.confirmCallback = null;
+    };
+
+    // ============= MODAL INPUT SYSTEM (Replaces Prompt) =============
+    window.inputCallback = null;
+    window.showInputModal = (title, initialValue, onConfirm) => {
+        const modal = document.getElementById('inputModal');
+        document.getElementById('inputTitle').textContent = title;
+        const input = document.getElementById('inputValue');
+        input.value = initialValue || '';
+        modal.classList.remove('hidden');
+        input.focus();
+        window.inputCallback = onConfirm;
+    };
+
+    window.handleInputConfirm = () => {
+        const value = document.getElementById('inputValue').value;
+        if (window.inputCallback) window.inputCallback(value);
+        window.hideInputModal();
+    };
+
+    window.hideInputModal = () => {
+        document.getElementById('inputModal').classList.add('hidden');
+        window.inputCallback = null;
+    };
 
     // ============= AUTH =============
     onAuthStateChanged(auth, (user) => {
@@ -47,7 +135,7 @@
       try {
         await signInWithEmailAndPassword(auth, email, password);
       } catch (error) {
-        alert('Erro no login: ' + error.message);
+        showToast('Erro no login: ' + error.message, 'error');
       }
     };
 
@@ -55,19 +143,29 @@
       const email = document.getElementById('loginEmail').value;
       const password = document.getElementById('loginPassword').value;
       if (password.length < 6) {
-        alert('A senha deve ter pelo menos 6 caracteres');
+        showToast('A senha deve ter pelo menos 6 caracteres', 'error');
         return;
       }
       try {
-        await createUserWithEmailAndPassword(auth, email, password);
-        alert('Conta criada com sucesso!');
+        const userCred = await createUserWithEmailAndPassword(auth, email, password);
+        const detectedCurrency = detectCurrency();
+        // Inicializa com uma plataforma padrão genérica
+        const defaultPlatforms = [{ id: 'geral', name: 'Geral', type: 'none', value: 0 }];
+        
+        await setDoc(doc(db, `users/${userCred.user.uid}/settings`, 'preferences'), {
+          currency: detectedCurrency,
+          platforms: defaultPlatforms,
+          tutorialComplete: false // Marca como novo usuário
+        });
+        showToast(`Conta criada! Moeda detectada: ${detectedCurrency}`, 'success');
       } catch (error) {
-        alert('Erro ao criar conta: ' + error.message);
+        showToast('Erro ao criar conta: ' + error.message, 'error');
       }
     };
 
     window.handleLogout = async () => {
       await signOut(auth);
+      window.location.reload();
     };
 
     // ============= DATA SYNC =============
@@ -81,6 +179,50 @@
       await deleteDoc(doc(db, `users/${currentUser.uid}/${collection_name}`, id));
     }
 
+    // ============= CLEAR ALL DATA =============
+    window.clearAllData = async () => {
+      window.showConfirm('TEM CERTEZA? Isso apagará TODOS os seus dados (ganhos, gastos, configurações) permanentemente. A página será recarregada.', async () => {
+        if (!currentUser) return;
+        
+        try {
+            showToast('Apagando dados...', 'info');
+            
+            // 1. Delete Earnings
+            const earningsSnap = await getDocs(collection(db, `users/${currentUser.uid}/earnings`));
+            const deleteEarnings = earningsSnap.docs.map(doc => deleteDoc(doc.ref));
+            
+            // 2. Delete Expenses
+            const expensesSnap = await getDocs(collection(db, `users/${currentUser.uid}/expenses`));
+            const deleteExpenses = expensesSnap.docs.map(doc => deleteDoc(doc.ref));
+            
+            // 3. Delete Weekly Fixed Expenses
+            const weeklySnap = await getDocs(collection(db, `users/${currentUser.uid}/weeklyFixedExpenses`));
+            const deleteWeekly = weeklySnap.docs.map(doc => deleteDoc(doc.ref));
+            
+            // 4. Reset Settings (Fixed Expenses, Goal, Preferences)
+            const deleteFixed = deleteDoc(doc(db, `users/${currentUser.uid}/settings`, 'fixedExpenses'));
+            const deleteGoal = deleteDoc(doc(db, `users/${currentUser.uid}/settings`, 'weekGoal'));
+            const deletePrefs = deleteDoc(doc(db, `users/${currentUser.uid}/settings`, 'preferences'));
+
+            await Promise.all([
+                ...deleteEarnings, 
+                ...deleteExpenses, 
+                ...deleteWeekly, 
+                deleteFixed, 
+                deleteGoal,
+                deletePrefs
+            ]);
+            
+            showToast('Dados apagados com sucesso!', 'success');
+            setTimeout(() => window.location.reload(), 1500);
+            
+        } catch (error) {
+            console.error(error);
+            showToast('Erro ao limpar dados: ' + error.message, 'error');
+        }
+      });
+    };
+
     async function loadAllData() {
       if (!currentUser) return;
       
@@ -89,6 +231,7 @@
       const fixedSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'fixedExpenses'));
       const weeklyFixedSnap = await getDocs(collection(db, `users/${currentUser.uid}/weeklyFixedExpenses`));
       const goalSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'weekGoal'));
+      const prefSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'preferences'));
 
       window.appData.earnings = [];
       earningsSnap.forEach(doc => window.appData.earnings.push({ id: doc.id, ...doc.data() }));
@@ -96,8 +239,31 @@
       window.appData.expenses = [];
       expensesSnap.forEach(doc => window.appData.expenses.push({ id: doc.id, ...doc.data() }));
       
+      // Defaults
+      const DEFAULT_PLATFORMS = [{ id: 'geral', name: 'Geral', type: 'none', value: 0 }];
+
+      if (prefSnap.exists()) {
+        const data = prefSnap.data();
+        window.appData.currency = data.currency || detectCurrency();
+        window.appData.platforms = data.platforms || DEFAULT_PLATFORMS;
+        
+        // Verifica se o tutorial já foi completado
+        if (data.tutorialComplete === false) {
+             window.appData.isNewUser = true;
+        } else if (data.tutorialComplete === undefined && !fixedSnap.exists()) {
+             // Fallback para usuários antigos ou migração
+             window.appData.isNewUser = true;
+        }
+      } else {
+        window.appData.currency = detectCurrency();
+        window.appData.platforms = DEFAULT_PLATFORMS;
+        window.appData.isNewUser = true;
+      }
+
       if (fixedSnap.exists()) {
         window.appData.fixedExpenses = fixedSnap.data();
+      } else {
+        window.appData.fixedExpenses = { 'Geral': [] };
       }
 
       window.appData.weeklyFixedExpenses = {};
@@ -132,6 +298,14 @@
       await saveToFirebase('settings', 'weekGoal', { value: goal });
     };
 
+    window.syncPreferences = async (tutorialComplete = true) => {
+      await saveToFirebase('settings', 'preferences', { 
+        currency: appData.currency, 
+        platforms: appData.platforms,
+        tutorialComplete: tutorialComplete
+      });
+    };
+
     window.deleteEarningFromFirebase = async (id) => {
       await deleteFromFirebase('earnings', id.toString());
     };
@@ -141,16 +315,43 @@
     };
   </script>
 </head>
-<body class="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white min-h-screen">
+<body class="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white min-h-screen font-sans">
+
+<!-- TOAST CONTAINER -->
+<div id="toastContainer" class="fixed bottom-4 right-4 z-[70] flex flex-col items-end pointer-events-none [&>*]:pointer-events-auto"></div>
+
+<!-- CONFIRM MODAL -->
+<div id="confirmModal" class="hidden fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-sm w-full shadow-2xl transform scale-100 transition-transform">
+    <h3 class="text-xl font-bold mb-2 text-white">Confirmação</h3>
+    <p id="confirmMessage" class="text-slate-300 mb-6"></p>
+    <div class="flex justify-end gap-3">
+      <button onclick="hideConfirm()" class="px-4 py-2 rounded-lg text-slate-400 hover:bg-slate-700 transition-colors">Cancelar</button>
+      <button onclick="handleConfirmYes()" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold transition-colors">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<!-- INPUT MODAL (Substitui Prompt) -->
+<div id="inputModal" class="hidden fixed inset-0 z-[85] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+    <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-sm w-full shadow-2xl transform scale-100 transition-transform">
+      <h3 id="inputTitle" class="text-xl font-bold mb-4 text-white">Entrada</h3>
+      <input type="number" id="inputValue" step="0.01" class="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-white mb-6 focus:border-blue-500 outline-none" />
+      <div class="flex justify-end gap-3">
+        <button onclick="hideInputModal()" class="px-4 py-2 rounded-lg text-slate-400 hover:bg-slate-700 transition-colors">Cancelar</button>
+        <button onclick="handleInputConfirm()" class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold transition-colors">Salvar</button>
+      </div>
+    </div>
+</div>
 
 <!-- AUTH SCREEN -->
 <div id="authScreen" class="flex items-center justify-center min-h-screen p-4">
-  <div class="bg-slate-800 border border-slate-700 rounded-2xl p-8 max-w-md w-full">
+  <div class="bg-slate-800 border border-slate-700 rounded-2xl p-8 max-w-md w-full shadow-2xl">
     <div class="text-center mb-8">
       <h1 class="text-4xl font-bold mb-2 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
         Controle Financeiro
       </h1>
-      <p class="text-slate-400">Faça login para continuar</p>
+      <p class="text-slate-400">Gerencie seus ganhos e gastos em qualquer lugar.</p>
     </div>
     
     <div class="space-y-4">
@@ -158,52 +359,53 @@
         type="email"
         id="loginEmail"
         placeholder="Email"
-        class="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-400"
+        class="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 transition-colors"
       />
       <input
         type="password"
         id="loginPassword"
         placeholder="Senha (mínimo 6 caracteres)"
-        class="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-400"
+        class="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 transition-colors"
       />
       <button
         onclick="handleLogin()"
-        class="w-full bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-3 font-bold transition-colors"
+        class="w-full bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-3 font-bold transition-colors shadow-lg shadow-blue-500/30"
       >
         Entrar
       </button>
       <button
         onclick="handleRegister()"
-        class="w-full bg-green-600 hover:bg-green-700 rounded-lg px-4 py-3 font-bold transition-colors"
+        class="w-full bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded-lg px-4 py-3 font-bold transition-colors"
       >
-        Criar Conta
+        Criar Nova Conta
       </button>
     </div>
     
     <p class="text-xs text-slate-500 mt-6 text-center">
-      Seus dados são criptografados e sincronizados entre dispositivos
+      A moeda será detectada automaticamente ao criar a conta.
     </p>
   </div>
 </div>
 
 <!-- APP SCREEN -->
-<div id="appScreen" class="hidden">
+<div id="appScreen" class="hidden pb-10">
   <nav class="bg-slate-800/80 backdrop-blur-sm border-b border-slate-700 sticky top-0 z-50">
     <div class="max-w-6xl mx-auto px-4">
       <div class="flex items-center justify-between h-16">
         <div class="flex items-center gap-3">
-          <svg class="w-7 h-7 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-          </svg>
-          <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-            Controle Financeiro
-          </h1>
+          <div class="bg-blue-600 p-2 rounded-lg">
+             <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          </div>
+          <h1 class="text-xl font-bold hidden md:block">Controle Financeiro</h1>
         </div>
         <div class="flex items-center gap-4">
-          <span class="text-sm text-slate-400" id="userEmail"></span>
+          <span class="text-xs md:text-sm text-slate-400 hidden sm:inline" id="userEmail"></span>
+          <button onclick="appData.showSettings = !appData.showSettings; renderApp();" class="p-2 hover:bg-slate-700 rounded-full transition-colors" title="Configurações">
+            ⚙️
+          </button>
           <button
             onclick="handleLogout()"
-            class="text-sm text-red-400 hover:text-red-300"
+            class="text-sm bg-red-500/10 text-red-400 hover:bg-red-500/20 px-3 py-1.5 rounded-lg transition-colors"
           >
             Sair
           </button>
@@ -217,43 +419,35 @@
   </div>
 </div>
 
+<!-- PLATFORM MANAGER MODAL -->
+<div id="platformManagerModal" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+   <!-- Rendered by JS -->
+</div>
+
 <script>
   // ============= APP STATE =============
   window.appData = {
     activeTab: 'dashboard',
+    currency: 'GBP',
+    isNewUser: false,
+    showSettings: false,
     earnings: [],
     expenses: [],
-    fixedExpenses: {
-      lloyds: [
-        { name: 'Cartão de crédito', value: 10 },
-        { name: 'Compras', value: 65 },
-        { name: 'Amazon Prime', value: 3 },
-        { name: 'Apple Care', value: 4 },
-        { name: 'YouTube Premium', value: 3 },
-        { name: 'Tax da Van', value: 8 }
-      ],
-      halifax: [
-        { name: 'Aluguel', value: 121 },
-        { name: 'Taxa da casa', value: 18.5 },
-        { name: 'Luz/Gás', value: 13 },
-        { name: 'Seguro', value: 10 },
-        { name: 'Celular', value: 29 }
-      ],
-      barclays: [{ name: 'Gasolina', value: 105 }],
-      chase: [{ name: 'Manutenção do carro', value: 25 }],
-      other: [{ name: 'Aluguel conta Uber (descontado na fonte)', value: 75 }]
-    },
-    weeklyFixedExpenses: {}, // Ajustes por semana específica
+    fixedExpenses: {},
+    weeklyFixedExpenses: {},
+    platforms: [], 
     selectedWeek: getCurrentWeek(),
     selectedYear: new Date().getFullYear(),
     selectedMonth: new Date().getMonth() + 1,
-    weekGoal: 489.5,
+    weekGoal: 500,
     showAddEarning: false,
     showAddExpense: false,
     showFixedExpensesEditor: false,
     showWeeklyAdjustment: false,
+    showPlatformManager: false,
     editingEarning: null,
-    editingExpense: null
+    editingExpense: null,
+    editingPlatformId: null
   };
 
   function getCurrentWeek() {
@@ -284,7 +478,6 @@
       .flat()
       .reduce((sum, exp) => sum + exp.value, 0);
     
-    // Aplicar ajuste semanal se existir
     if (appData.weeklyFixedExpenses[weekStart]) {
       total = appData.weeklyFixedExpenses[weekStart].total;
     }
@@ -292,38 +485,19 @@
     return total;
   }
 
-  function getPaymentDate(platform, workDate) {
-    const work = new Date(workDate);
-    const dayOfWeek = work.getDay();
+  function getPlatform(id) {
+    return appData.platforms.find(p => p.id === id) || appData.platforms[0] || { name: 'Desconhecido', type: 'none', value: 0 };
+  }
 
-    if (platform === 'justeat') {
-      const friday = new Date(work);
-      const daysUntilFriday = (5 - dayOfWeek + 7) % 7;
-      friday.setDate(work.getDate() + daysUntilFriday + 7);
-      return friday;
+  function calculateNetEarning(amount, platformId) {
+    const p = getPlatform(platformId);
+    let net = amount;
+    if (p.type === 'percent') {
+        net = amount * (1 - p.value / 100);
+    } else if (p.type === 'fixed') {
+        net = amount - p.value;
     }
-
-    if (platform === 'uber') {
-      const nextMonday = new Date(work);
-      const daysUntilMonday = (8 - dayOfWeek) % 7 || 7;
-      nextMonday.setDate(work.getDate() + daysUntilMonday);
-      return nextMonday;
-    }
-
-    if (platform === 'flex') {
-      if (dayOfWeek >= 1 && dayOfWeek <= 3) {
-        const thursday = new Date(work);
-        thursday.setDate(work.getDate() + (4 - dayOfWeek));
-        return thursday;
-      } else {
-        const nextThursday = new Date(work);
-        const daysUntilThursday = (11 - dayOfWeek) % 7;
-        nextThursday.setDate(work.getDate() + daysUntilThursday);
-        return nextThursday;
-      }
-    }
-    
-    return new Date(work);
+    return net;
   }
 
   function getWeekLabel(weekStart) {
@@ -331,21 +505,12 @@
     const weekDate = new Date(weekStart);
     const currentDate = new Date(currentWeek);
     
-    if (weekStart === currentWeek) {
-      return 'Semana Atual';
-    }
-    
+    if (weekStart === currentWeek) return 'Semana Atual';
     const weeksDiff = Math.round((currentDate - weekDate) / (7 * 24 * 60 * 60 * 1000));
-    
     if (weeksDiff === 1) return 'Semana Passada';
-    if (weeksDiff === 2) return 'Há 2 semanas';
-    if (weeksDiff === 3) return 'Há 3 semanas';
-    if (weeksDiff === 4) return 'Há 1 mês';
-    if (weeksDiff > 4 && weeksDiff <= 8) return 'Há 2 meses';
-    if (weeksDiff > 8 && weeksDiff <= 12) return 'Há 3 meses';
-    
-    const monthsDiff = Math.floor(weeksDiff / 4);
-    return `Há ${monthsDiff} meses`;
+    if (weeksDiff === 0) return 'Esta Semana';
+    if (weeksDiff < 0) return 'Próxima Semana';
+    return `Há ${weeksDiff} semanas`;
   }
 
   function getWeeksList() {
@@ -360,10 +525,7 @@
     return appData.earnings
       .filter(e => getWeekFromDate(e.date) === weekStart)
       .reduce((sum, e) => {
-        let amount = e.amount;
-        if (e.platform === 'justeat' || e.platform === 'flex') amount *= 0.8;
-        if (e.platform === 'uber') amount -= 75;
-        return sum + amount;
+        return sum + calculateNetEarning(e.amount, e.platformId);
       }, 0);
   }
 
@@ -374,11 +536,68 @@
   }
 
   // ============= ACTIONS =============
+  window.changeCurrency = async (newCurrency) => {
+    appData.currency = newCurrency;
+    appData.showSettings = false;
+    await window.syncPreferences();
+    renderApp();
+    showToast('Moeda alterada com sucesso!', 'success');
+  };
+
+  window.savePlatform = async (id, name, type, value) => {
+     if(!name) return showToast('Nome é obrigatório', 'error');
+     const newVal = parseFloat(value) || 0;
+     
+     if (id) {
+        const idx = appData.platforms.findIndex(p => p.id === id);
+        if(idx >= 0) {
+            appData.platforms[idx] = { ...appData.platforms[idx], name, type, value: newVal };
+        }
+     } else {
+        appData.platforms.push({ id: Date.now().toString(), name, type, value: newVal });
+     }
+     
+     appData.editingPlatformId = null; // Limpa estado de edição
+     await window.syncPreferences();
+     renderApp();
+     showToast(id ? 'Fonte atualizada!' : 'Fonte adicionada!', 'success');
+  };
+  
+  window.startEditingPlatform = (id) => {
+      appData.editingPlatformId = id;
+      renderApp();
+  };
+
+  window.deletePlatform = async (id) => {
+    window.showConfirm('Deletar esta fonte? Os ganhos antigos usarão a regra padrão.', async () => {
+        appData.platforms = appData.platforms.filter(p => p.id !== id);
+        if(appData.editingPlatformId === id) appData.editingPlatformId = null;
+        await window.syncPreferences();
+        renderApp();
+        showToast('Fonte removida', 'info');
+    });
+  };
+
+  // ============= AUTO UPDATE GOAL =============
+  window.checkAndAutoUpdateGoal = async () => {
+      const weekStart = appData.selectedWeek;
+      const varExpenses = calculateWeekExpenses(weekStart);
+      const fixExpenses = getTotalFixedExpenses(weekStart);
+      const total = varExpenses + fixExpenses;
+
+      if (total > appData.weekGoal) {
+          appData.weekGoal = total;
+          await window.syncWeekGoal(total);
+          showToast(`Meta ajustada automaticamente: ${formatMoney(total)}`, 'info');
+      }
+  };
+
   window.addEarning = async (earning) => {
     const newEarning = { ...earning, id: Date.now() };
     appData.earnings.push(newEarning);
     await window.syncEarning(newEarning);
     appData.showAddEarning = false;
+    showToast('Entrada adicionada!', 'success');
     renderApp();
   };
 
@@ -387,20 +606,28 @@
     appData.earnings[index] = { ...updatedEarning, id };
     await window.syncEarning(appData.earnings[index]);
     appData.editingEarning = null;
+    showToast('Entrada atualizada!', 'success');
     renderApp();
   };
 
   window.deleteEarning = async (id) => {
-    appData.earnings = appData.earnings.filter(e => e.id !== id);
-    await window.deleteEarningFromFirebase(id);
-    renderApp();
+    window.showConfirm('Tem certeza que deseja deletar esta entrada?', async () => {
+        appData.earnings = appData.earnings.filter(e => e.id !== id);
+        await window.deleteEarningFromFirebase(id);
+        renderApp();
+        showToast('Entrada removida.', 'info');
+    });
   };
 
   window.addExpense = async (expense) => {
     const newExpense = { ...expense, id: Date.now() };
     appData.expenses.push(newExpense);
     await window.syncExpense(newExpense);
+    
+    await window.checkAndAutoUpdateGoal();
+    
     appData.showAddExpense = false;
+    showToast('Gasto variável adicionado!', 'success');
     renderApp();
   };
 
@@ -408,14 +635,21 @@
     const index = appData.expenses.findIndex(e => e.id === id);
     appData.expenses[index] = { ...updatedExpense, id };
     await window.syncExpense(appData.expenses[index]);
+
+    await window.checkAndAutoUpdateGoal();
+
     appData.editingExpense = null;
+    showToast('Gasto atualizado!', 'success');
     renderApp();
   };
 
   window.deleteExpense = async (id) => {
-    appData.expenses = appData.expenses.filter(e => e.id !== id);
-    await window.deleteExpenseFromFirebase(id);
-    renderApp();
+    window.showConfirm('Tem certeza que deseja deletar este gasto?', async () => {
+        appData.expenses = appData.expenses.filter(e => e.id !== id);
+        await window.deleteExpenseFromFirebase(id);
+        renderApp();
+        showToast('Gasto removido.', 'info');
+    });
   };
 
   window.saveWeeklyAdjustment = async () => {
@@ -424,7 +658,11 @@
     
     appData.weeklyFixedExpenses[weekStart] = { total: newTotal };
     await window.syncWeeklyFixedExpense(weekStart, { total: newTotal });
+    
+    await window.checkAndAutoUpdateGoal();
+
     appData.showWeeklyAdjustment = false;
+    showToast('Ajuste semanal salvo!', 'success');
     renderApp();
   };
 
@@ -432,13 +670,21 @@
     const weekStart = appData.selectedWeek;
     delete appData.weeklyFixedExpenses[weekStart];
     await window.deleteFromFirebase('weeklyFixedExpenses', weekStart);
+    
+    await window.checkAndAutoUpdateGoal();
+    
     appData.showWeeklyAdjustment = false;
+    showToast('Ajuste removido, usando valor padrão.', 'info');
     renderApp();
   };
 
   window.updateFixedExpenses = async (newFixed) => {
     appData.fixedExpenses = newFixed;
     await window.syncFixedExpenses(newFixed);
+    
+    await window.checkAndAutoUpdateGoal();
+    
+    showToast('Gastos fixos atualizados!', 'success');
     renderApp();
   };
 
@@ -446,19 +692,174 @@
     appData.weekGoal = goal;
     await window.syncWeekGoal(goal);
     renderApp();
+    showToast('Nova meta definida!', 'success');
   };
+
+  window.promptWeekGoal = () => {
+      window.showInputModal('Nova Meta Semanal', appData.weekGoal, (val) => {
+         if(val) saveWeekGoal(parseFloat(val));
+      });
+  };
+
+  window.finishOnboarding = async (currency) => {
+      appData.currency = currency;
+      appData.isNewUser = false;
+      // Salva preferencia e marca tutorial como completo
+      await window.syncPreferences(true); 
+      renderApp();
+      showToast(`Moeda definida: ${currency}. Bem-vindo!`, 'success');
+  };
+
+
+  // ============= TUTORIAL / ONBOARDING =============
+  function renderTutorialOverlay() {
+    if (!appData.isNewUser) return '';
+    
+    // Simplificado: Apenas seleção de moeda
+    return `
+      <div class="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-8 max-w-md w-full text-center shadow-2xl relative overflow-hidden animate-fade-in">
+          <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-purple-500"></div>
+          <h2 class="text-3xl font-bold mb-4 text-white">Bem-vindo!</h2>
+          <p class="text-slate-300 mb-8">Para começar, por favor selecione a moeda principal que você utiliza.</p>
+          
+          <div class="grid gap-3">
+            <button onclick="finishOnboarding('BRL')" class="flex items-center justify-between px-6 py-4 rounded-xl bg-slate-700 hover:bg-green-600/20 hover:border-green-500 border border-slate-600 transition-all group">
+              <span class="font-bold text-white group-hover:text-green-400">Real Brasileiro</span>
+              <span class="text-slate-400 group-hover:text-green-400 font-mono">R$</span>
+            </button>
+            <button onclick="finishOnboarding('EUR')" class="flex items-center justify-between px-6 py-4 rounded-xl bg-slate-700 hover:bg-blue-600/20 hover:border-blue-500 border border-slate-600 transition-all group">
+              <span class="font-bold text-white group-hover:text-blue-400">Euro</span>
+              <span class="text-slate-400 group-hover:text-blue-400 font-mono">€</span>
+            </button>
+            <button onclick="finishOnboarding('GBP')" class="flex items-center justify-between px-6 py-4 rounded-xl bg-slate-700 hover:bg-purple-600/20 hover:border-purple-500 border border-slate-600 transition-all group">
+              <span class="font-bold text-white group-hover:text-purple-400">Libra Esterlina</span>
+              <span class="text-slate-400 group-hover:text-purple-400 font-mono">£</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSettingsModal() {
+    if (!appData.showSettings) return '';
+    return `
+      <div class="fixed inset-0 bg-black/60 z-[55] flex items-center justify-center p-4" onclick="if(event.target === this) {appData.showSettings=false; renderApp();}">
+        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-sm w-full">
+          <h3 class="text-xl font-bold mb-4">Configurações</h3>
+          
+          <div class="mb-6">
+            <label class="block text-sm font-medium mb-2 text-slate-400">Moeda Principal</label>
+            <div class="grid grid-cols-3 gap-2">
+              <button onclick="changeCurrency('BRL')" class="p-2 rounded border ${appData.currency === 'BRL' ? 'bg-blue-600 border-blue-500' : 'bg-slate-700 border-slate-600'}">R$ Real</button>
+              <button onclick="changeCurrency('EUR')" class="p-2 rounded border ${appData.currency === 'EUR' ? 'bg-blue-600 border-blue-500' : 'bg-slate-700 border-slate-600'}">€ Euro</button>
+              <button onclick="changeCurrency('GBP')" class="p-2 rounded border ${appData.currency === 'GBP' ? 'bg-blue-600 border-blue-500' : 'bg-slate-700 border-slate-600'}">£ Libra</button>
+            </div>
+          </div>
+          
+          <div class="mb-4 pt-4 border-t border-slate-700">
+             <h4 class="text-sm font-bold text-rose-400 mb-2 uppercase">Zona de Perigo</h4>
+             <button onclick="clearAllData()" class="w-full bg-rose-900/30 hover:bg-rose-900/50 text-rose-300 border border-rose-800 rounded-lg px-4 py-3 text-sm transition-colors flex items-center justify-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                Resetar Conta (Apagar Tudo)
+             </button>
+          </div>
+
+          <div class="pt-4 border-t border-slate-700 flex justify-end">
+            <button onclick="appData.showSettings=false; renderApp();" class="text-slate-400 hover:text-white px-4 py-2">Fechar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderPlatformManager() {
+    if(!appData.showPlatformManager) return '';
+    
+    // Determine se estamos editando ou adicionando
+    let editingPlatform = null;
+    if (appData.editingPlatformId) {
+        editingPlatform = appData.platforms.find(p => p.id === appData.editingPlatformId);
+    }
+    
+    const nameVal = editingPlatform ? editingPlatform.name : '';
+    const typeVal = editingPlatform ? editingPlatform.type : 'none';
+    const valueVal = editingPlatform ? editingPlatform.value : '';
+    const titleText = editingPlatform ? 'Editar Fonte' : 'Adicionar Nova Fonte';
+    const btnText = editingPlatform ? 'Atualizar' : 'Adicionar';
+    const cancelEditBtn = editingPlatform ? `<button onclick="appData.editingPlatformId=null; renderApp()" class="text-xs text-slate-400 underline ml-2">Cancelar Edição</button>` : '';
+
+    return `
+    <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-lg w-full shadow-2xl relative animate-fade-in max-h-[90vh] overflow-y-auto">
+        <div class="flex justify-between items-center mb-6">
+            <h3 class="text-xl font-bold text-white">Gerenciar Fontes de Renda</h3>
+            <button onclick="appData.showPlatformManager=false; appData.editingPlatformId=null; renderApp();" class="text-slate-400 hover:text-white">✕</button>
+        </div>
+        
+        <div class="mb-6 bg-slate-700/50 p-4 rounded-lg border border-slate-600">
+            <div class="flex items-center justify-between mb-3">
+                <h4 class="text-sm font-bold text-blue-400 uppercase">${titleText}</h4>
+                ${cancelEditBtn}
+            </div>
+            <div class="space-y-3">
+                <input type="text" id="newPlatName" value="${nameVal}" placeholder="Nome (Ex: Just Eat, Mesada)" class="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm outline-none focus:border-blue-500">
+                <div class="flex gap-2">
+                    <select id="newPlatType" class="bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm outline-none flex-1">
+                        <option value="none" ${typeVal === 'none' ? 'selected' : ''}>Sem Dedução (100%)</option>
+                        <option value="percent" ${typeVal === 'percent' ? 'selected' : ''}>Porcentagem (%)</option>
+                        <option value="fixed" ${typeVal === 'fixed' ? 'selected' : ''}>Valor Fixo (-)</option>
+                    </select>
+                    <input type="number" id="newPlatValue" value="${valueVal}" placeholder="Valor" class="w-24 bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm outline-none focus:border-blue-500">
+                </div>
+                <button onclick="savePlatform('${appData.editingPlatformId || ''}', document.getElementById('newPlatName').value, document.getElementById('newPlatType').value, document.getElementById('newPlatValue').value)" class="w-full bg-blue-600 hover:bg-blue-700 py-2 rounded font-bold text-sm transition-colors">${btnText}</button>
+            </div>
+        </div>
+
+        <div class="space-y-3">
+            ${appData.platforms.map(p => `
+                <div class="flex items-center justify-between bg-slate-700/30 p-3 rounded-lg border border-slate-700 hover:bg-slate-700/50 transition-colors">
+                    <div>
+                        <p class="font-bold text-white">${p.name}</p>
+                        <p class="text-xs text-slate-400">
+                            ${p.type === 'none' ? 'Sem dedução' : p.type === 'percent' ? `Desconta ${p.value}%` : `Desconta ${formatMoney(p.value)}`}
+                        </p>
+                    </div>
+                    <div class="flex gap-2">
+                         <button onclick="startEditingPlatform('${p.id}')" class="p-2 text-blue-400 hover:bg-blue-500/10 rounded" title="Editar">✏️</button>
+                         <button onclick="deletePlatform('${p.id}')" class="p-2 text-rose-400 hover:bg-rose-500/10 rounded" title="Excluir">🗑️</button>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    </div>
+    `;
+  }
 
   // ============= RENDER =============
   window.renderApp = () => {
     const content = document.getElementById('appContent');
+    const modalContainer = document.getElementById('platformManagerModal');
     if (!content) return;
 
+    let mainContent = '';
     if (appData.activeTab === 'dashboard') {
-      content.innerHTML = renderDashboard();
+      mainContent = renderDashboard();
     } else if (appData.activeTab === 'monthly') {
-      content.innerHTML = renderMonthly();
+      mainContent = renderMonthly();
     } else if (appData.activeTab === 'fixed') {
-      content.innerHTML = renderFixed();
+      mainContent = renderFixed();
+    }
+
+    content.innerHTML = mainContent + renderSettingsModal() + renderTutorialOverlay();
+    
+    // Render Modal
+    if(appData.showPlatformManager) {
+        modalContainer.innerHTML = renderPlatformManager();
+        modalContainer.classList.remove('hidden');
+    } else {
+        modalContainer.classList.add('hidden');
+        modalContainer.innerHTML = '';
     }
   };
 
@@ -473,141 +874,101 @@
     const progressPercentage = Math.min((weekEarningsGross / appData.weekGoal) * 100, 100);
     const hasWeeklyAdjustment = appData.weeklyFixedExpenses[appData.selectedWeek];
 
+    const hasData = appData.earnings.length > 0 || appData.expenses.length > 0;
+    const isTotalEmpty = Object.keys(appData.fixedExpenses).length === 0 && !hasData;
+
+    if (isTotalEmpty && !appData.isNewUser) {
+        return `
+          <div class="text-center py-20">
+            <h2 class="text-2xl font-bold mb-4">Tudo limpo por aqui!</h2>
+            <p class="text-slate-400 mb-8 max-w-md mx-auto">Comece adicionando seus gastos fixos (aluguel, contas) para que o sistema possa calcular suas metas.</p>
+            <button onclick="appData.activeTab='fixed'; appData.showFixedExpensesEditor=true; renderApp();" class="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-xl font-bold transition-all transform hover:scale-105 shadow-lg shadow-blue-500/30">
+              Adicionar Gastos Fixos
+            </button>
+          </div>
+        `;
+    }
+
     return `
-      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-2 rounded-lg">
-        <button onclick="appData.activeTab='dashboard'; renderApp();" class="px-4 py-2 rounded-lg bg-blue-600 text-white">Dashboard</button>
-        <button onclick="appData.activeTab='monthly'; renderApp();" class="px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700">Resumo Mensal</button>
-        <button onclick="appData.activeTab='fixed'; renderApp();" class="px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700">Gastos Fixos</button>
+      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
+        <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Dashboard</button>
+        <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Mensal</button>
+        <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Fixos</button>
       </nav>
 
-      <header class="mb-8 text-center">
-        <p class="text-slate-400">Multi-plataforma de Delivery</p>
-      </header>
-
-      <div class="mb-6">
-        <label class="block text-sm font-medium mb-2">Selecione a Semana</label>
-        <select onchange="appData.selectedWeek=this.value; renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white">
-          ${getWeeksList().map(week => `
-            <option value="${week}" ${week === appData.selectedWeek ? 'selected' : ''}>
-              ${getWeekLabel(week)} (${new Date(week).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} - ${new Date(getWeekEnd(week)).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })})
-            </option>
-          `).join('')}
-        </select>
-      </div>
-
-      <div class="bg-gradient-to-br from-blue-500/10 to-purple-500/10 border border-blue-500/30 rounded-xl p-6 mb-8">
-        <div class="flex items-center justify-between mb-4">
-          <div>
-            <h2 class="text-2xl font-bold">${getWeekLabel(appData.selectedWeek)}</h2>
-            <p class="text-sm text-slate-400 mt-1">
-              ${new Date(appData.selectedWeek).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} - ${new Date(getWeekEnd(appData.selectedWeek)).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} • DESEMPENHO DA SEMANA
-            </p>
-          </div>
-          <div class="text-right">
-            <p class="text-sm text-slate-400">Saldo após Gastos</p>
-            <p class="text-3xl font-bold ${weekBalance >= 0 ? 'text-green-400' : 'text-red-400'}">
-              £${weekBalance.toFixed(2)}
-            </p>
-          </div>
-        </div>
-
-        <div class="mb-4">
-          <div class="flex justify-between text-sm mb-2">
-            <span class="text-slate-300">Faturado: £${weekEarningsGross.toFixed(2)}</span>
-            <div class="flex items-center gap-2">
-              <span class="text-slate-300">Meta: £${appData.weekGoal.toFixed(2)}</span>
-              <button onclick="const goal = prompt('Nova meta semanal:', appData.weekGoal); if(goal) saveWeekGoal(parseFloat(goal));" class="text-blue-400 hover:text-blue-300 text-xs">✏️</button>
-            </div>
-          </div>
-          <div class="w-full bg-slate-700 rounded-full h-6 overflow-hidden">
-            <div class="${progressPercentage >= 100 ? 'bg-green-500' : 'bg-blue-500'} h-full flex items-center justify-end pr-2 transition-all duration-500" style="width: ${progressPercentage}%">
-              ${progressPercentage > 10 ? `<span class="text-xs font-bold text-white">${progressPercentage.toFixed(0)}%</span>` : ''}
-            </div>
-          </div>
-        </div>
-
-        <div class="space-y-3">
-          ${appData.earnings
-            .filter(e => getWeekFromDate(e.date) === appData.selectedWeek)
-            .sort((a, b) => new Date(b.date) - new Date(a.date))
-            .map(earning => {
-              const payDate = getPaymentDate(earning.platform, earning.date);
-              const netAmount = earning.platform === 'justeat' || earning.platform === 'flex' 
-                ? earning.amount * 0.8 
-                : earning.amount - 75;
-              const platformName = earning.platform === 'flex' ? 'Flex' : earning.platform === 'justeat' ? 'Just Eat' : 'Uber';
-              
-              return `
-                <div class="bg-slate-700/50 rounded-lg p-4 border-l-4 border-green-500">
-                  <div class="flex justify-between items-start">
-                    <div>
-                      <p class="font-bold text-lg">${platformName}</p>
-                      <p class="text-sm text-slate-400">${new Date(earning.date).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</p>
-                      <p class="text-xs text-blue-400 mt-1">Recebe ${payDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}</p>
-                    </div>
-                    <div class="text-right">
-                      <p class="text-2xl font-bold text-green-400">£${earning.amount.toFixed(2)}</p>
-                      <p class="text-xs text-slate-400">£${netAmount.toFixed(2)}</p>
-                    </div>
-                  </div>
-                </div>
-              `;
-            }).join('')}
-          
-          ${appData.expenses
-            .filter(e => e.week === appData.selectedWeek)
-            .sort((a, b) => new Date(b.date) - new Date(a.date))
-            .map(expense => `
-              <div class="bg-slate-700/50 rounded-lg p-4 border-l-4 border-red-500">
-                <div class="flex justify-between items-start">
-                  <div>
-                    <p class="font-bold text-lg text-red-400">${expense.description}</p>
-                    <p class="text-sm text-slate-400">${new Date(expense.date).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</p>
-                    <p class="text-xs text-slate-500 mt-1">Gasto variável</p>
-                  </div>
-                  <div class="text-right">
-                    <p class="text-2xl font-bold text-red-400">-£${expense.amount.toFixed(2)}</p>
-                  </div>
-                </div>
-              </div>
+      <div class="mb-6 flex flex-col md:flex-row gap-4 items-end md:items-center justify-between">
+        <div class="w-full md:w-64">
+          <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Período</label>
+          <select onchange="appData.selectedWeek=this.value; renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+            ${getWeeksList().map(week => `
+              <option value="${week}" ${week === appData.selectedWeek ? 'selected' : ''}>
+                ${getWeekLabel(week)} (${new Date(week).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} - ${new Date(getWeekEnd(week)).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })})
+              </option>
             `).join('')}
+          </select>
         </div>
       </div>
 
-      <div class="grid md:grid-cols-3 gap-6 mb-8">
-        <div class="bg-gradient-to-br from-green-500/20 to-green-600/20 border border-green-500/30 rounded-xl p-6">
-          <div class="flex items-center justify-between mb-2">
-            <span class="text-green-400 text-sm font-medium">Ganhos Líquidos</span>
+      <div class="bg-gradient-to-br from-blue-900/40 to-slate-800 border border-blue-500/20 rounded-2xl p-6 mb-8 relative overflow-hidden">
+        <div class="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 rounded-full blur-3xl -mr-10 -mt-10"></div>
+        
+        <div class="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 relative z-10">
+          <div>
+            <h2 class="text-3xl font-bold text-white mb-1">Resumo Semanal</h2>
+            <p class="text-sm text-blue-300">
+             Saldo líquido estimado
+            </p>
           </div>
-          <p class="text-3xl font-bold">£${weekEarnings.toFixed(2)}</p>
+          <div class="text-left md:text-right mt-4 md:mt-0">
+            <p class="text-4xl font-bold ${weekBalance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">
+              ${formatMoney(weekBalance)}
+            </p>
+          </div>
         </div>
 
-        <div class="bg-gradient-to-br from-red-500/20 to-red-600/20 border border-red-500/30 rounded-xl p-6">
-          <div class="flex items-center justify-between mb-2">
-            <span class="text-red-400 text-sm font-medium">Gastos Totais</span>
+        <div class="mb-2 relative z-10">
+          <div class="flex justify-between text-sm mb-2">
+            <span class="text-slate-300">Faturado: ${formatMoney(weekEarningsGross)}</span>
+            <div class="flex items-center gap-2 group cursor-pointer" onclick="window.promptWeekGoal()">
+              <span class="text-slate-300 group-hover:text-white transition-colors">Meta: ${formatMoney(appData.weekGoal)}</span>
+              <span class="text-blue-400 text-xs">✏️</span>
+            </div>
           </div>
-          <p class="text-3xl font-bold">£${(weekExpenses + totalFixedExpenses).toFixed(2)}</p>
-          <p class="text-sm text-slate-400 mt-1">Fixos: £${totalFixedExpenses} | Variáveis: £${weekExpenses.toFixed(2)}</p>
-          ${hasWeeklyAdjustment ? '<p class="text-xs text-yellow-400 mt-1">⚠️ Ajuste semanal aplicado</p>' : ''}
+          <div class="w-full bg-slate-700/50 rounded-full h-4 overflow-hidden">
+            <div class="${progressPercentage >= 100 ? 'bg-emerald-500' : 'bg-blue-500'} h-full rounded-full transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(59,130,246,0.5)]" style="width: ${progressPercentage}%"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+        <div class="bg-slate-800/50 border border-emerald-500/20 rounded-xl p-5 hover:bg-slate-800 transition-colors">
+          <span class="text-emerald-400 text-xs font-bold uppercase tracking-wider">Líquido</span>
+          <p class="text-2xl font-bold mt-1 text-white">${formatMoney(weekEarnings)}</p>
         </div>
 
-        <div class="bg-gradient-to-br ${weekBalance >= 0 ? 'from-blue-500/20 to-blue-600/20 border-blue-500/30' : 'from-orange-500/20 to-orange-600/20 border-orange-500/30'} border rounded-xl p-6">
-          <div class="flex items-center justify-between mb-2">
-            <span class="${weekBalance >= 0 ? 'text-blue-400' : 'text-orange-400'} text-sm font-medium">Saldo Semanal</span>
-          </div>
-          <p class="text-3xl font-bold">£${weekBalance.toFixed(2)}</p>
-          <button onclick="appData.showWeeklyAdjustment=!appData.showWeeklyAdjustment; renderApp();" class="text-xs text-blue-400 hover:text-blue-300 mt-2">
-            ${hasWeeklyAdjustment ? 'Ajustar gastos fixos desta semana' : 'Ajustar gastos fixos desta semana'}
-          </button>
+        <div class="bg-slate-800/50 border border-rose-500/20 rounded-xl p-5 hover:bg-slate-800 transition-colors">
+          <span class="text-rose-400 text-xs font-bold uppercase tracking-wider">Gastos Totais</span>
+          <p class="text-2xl font-bold mt-1 text-white">${formatMoney(weekExpenses + totalFixedExpenses)}</p>
+          <p class="text-xs text-slate-500 mt-1">Fixos: ${formatMoney(totalFixedExpenses)}</p>
+        </div>
+
+        <div class="col-span-2 md:col-span-1 bg-slate-800/50 border border-slate-700 rounded-xl p-5 hover:bg-slate-800 transition-colors cursor-pointer" onclick="appData.showWeeklyAdjustment=!appData.showWeeklyAdjustment; renderApp();">
+           <div class="flex justify-between items-start">
+              <div>
+                <span class="text-blue-400 text-xs font-bold uppercase tracking-wider">Ajuste Fixo Semanal</span>
+                <p class="text-xl font-bold mt-1 text-white">${hasWeeklyAdjustment ? 'Ativo' : 'Padrão'}</p>
+              </div>
+              <span class="text-lg">⚙️</span>
+           </div>
+           ${hasWeeklyAdjustment ? `<p class="text-xs text-yellow-400 mt-1">Ajustado para ${formatMoney(appData.weeklyFixedExpenses[appData.selectedWeek].total)}</p>` : ''}
         </div>
       </div>
 
       ${appData.showWeeklyAdjustment ? `
-        <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-6 mb-8">
-          <h3 class="text-xl font-bold mb-4">Ajustar Gastos Fixos - ${getWeekLabel(appData.selectedWeek)}</h3>
+        <div class="bg-slate-800 border border-slate-600 rounded-xl p-6 mb-8 animate-fade-in">
+          <h3 class="text-lg font-bold mb-4">Ajustar Gastos Fixos - ${getWeekLabel(appData.selectedWeek)}</h3>
           <p class="text-sm text-slate-400 mb-4">
-            Gastos fixos padrão: £${Object.values(appData.fixedExpenses).flat().reduce((sum, exp) => sum + exp.value, 0).toFixed(2)}
-            ${hasWeeklyAdjustment ? ` | Ajuste atual: £${appData.weeklyFixedExpenses[appData.selectedWeek].total.toFixed(2)}` : ''}
+            Use isso se nesta semana específica seus gastos fixos forem diferentes do padrão (ex: aluguel mais caro, conta extra).
           </p>
           <div class="flex gap-3">
             <input
@@ -615,129 +976,100 @@
               step="0.01"
               id="weeklyFixedTotal"
               value="${hasWeeklyAdjustment ? appData.weeklyFixedExpenses[appData.selectedWeek].total : totalFixedExpenses}"
-              placeholder="Total de gastos fixos para esta semana"
-              class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-4 py-2"
+              class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 focus:border-blue-500 outline-none"
             />
             <button onclick="saveWeeklyAdjustment()" class="bg-green-600 hover:bg-green-700 rounded-lg px-6 py-2">Salvar</button>
-            ${hasWeeklyAdjustment ? '<button onclick="removeWeeklyAdjustment()" class="bg-red-600 hover:bg-red-700 rounded-lg px-6 py-2">Remover Ajuste</button>' : ''}
-            <button onclick="appData.showWeeklyAdjustment=false; renderApp();" class="bg-slate-600 hover:bg-slate-500 rounded-lg px-6 py-2">Cancelar</button>
+            ${hasWeeklyAdjustment ? '<button onclick="removeWeeklyAdjustment()" class="bg-red-600 hover:bg-red-700 rounded-lg px-6 py-2">Restaurar Padrão</button>' : ''}
           </div>
         </div>
       ` : ''}
 
       <div class="grid md:grid-cols-2 gap-6">
-        <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
-          <div class="flex items-center justify-between mb-4">
-            <h2 class="text-xl font-bold">Ganhos Registrados</h2>
-            <button onclick="appData.showAddEarning=!appData.showAddEarning; renderApp();" class="bg-green-600 hover:bg-green-700 rounded-lg px-4 py-2">
-              + Adicionar
+        <!-- Earnings Section -->
+        <div class="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6">
+          <div class="flex items-center justify-between mb-6">
+            <h2 class="text-xl font-bold flex items-center gap-2">
+              <span class="w-2 h-6 bg-emerald-500 rounded-full"></span>
+              Entradas
+            </h2>
+            <button onclick="appData.showAddEarning=!appData.showAddEarning; renderApp();" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-bold transition-colors">
+              + Novo
             </button>
           </div>
+          
           ${appData.showAddEarning ? renderEarningForm() : ''}
-          <div class="space-y-2 max-h-96 overflow-y-auto">
+          
+          <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
             ${appData.earnings
               .filter(e => getWeekFromDate(e.date) === appData.selectedWeek)
-              .map(earning => appData.editingEarning === earning.id ? renderEarningForm(earning) : `
-                <div class="bg-slate-700/50 rounded-lg p-4 flex justify-between items-center">
-                  <div>
-                    <p class="font-medium">${earning.platform === 'flex' ? 'Flex' : earning.platform === 'justeat' ? 'Just Eat' : 'Uber'}</p>
-                    <p class="text-sm text-slate-400">${new Date(earning.date).toLocaleDateString('pt-BR')}</p>
-                  </div>
-                  <div class="flex items-center gap-3">
-                    <div class="text-right">
-                      <p class="text-lg font-bold text-green-400">£${earning.amount}</p>
-                      ${(earning.platform === 'justeat' || earning.platform === 'flex') ? 
-                        `<p class="text-xs text-slate-400">Líquido: £${(earning.amount * 0.8).toFixed(2)}</p>` : ''}
-                      ${earning.platform === 'uber' ? 
-                        `<p class="text-xs text-slate-400">Líquido: £${(earning.amount - 75).toFixed(2)}</p>` : ''}
+              .sort((a, b) => new Date(b.date) - new Date(a.date))
+              .map(earning => {
+                const platform = getPlatform(earning.platformId);
+                const net = calculateNetEarning(earning.amount, earning.platformId);
+                return appData.editingEarning === earning.id ? renderEarningForm(earning) : `
+                <div class="bg-slate-700/30 hover:bg-slate-700/50 rounded-xl p-4 border border-slate-700 transition-all">
+                  <div class="flex justify-between items-start">
+                    <div>
+                      <div class="flex items-center gap-2">
+                        <p class="font-bold text-white capitalize">${platform.name}</p>
+                        ${platform.type !== 'none' ? `<span class="text-[10px] px-1.5 py-0.5 bg-slate-600 rounded text-slate-300">${platform.type === 'percent' ? '-' + platform.value + '%' : '-' + formatMoney(platform.value)}</span>` : ''}
+                      </div>
+                      <p class="text-sm text-slate-400">${new Date(earning.date).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</p>
                     </div>
-                    <button onclick="appData.editingEarning=${earning.id}; renderApp();" class="text-blue-400 hover:text-blue-300">✏️</button>
-                    <button onclick="if(confirm('Deletar este ganho?')) deleteEarning(${earning.id});" class="text-red-400 hover:text-red-300">🗑️</button>
+                    <div class="flex flex-col items-end">
+                      <div class="flex items-center gap-3 mb-1">
+                        <p class="text-lg font-bold text-emerald-400">${formatMoney(earning.amount)}</p>
+                         <div class="flex gap-1">
+                          <button onclick="appData.editingEarning=${earning.id}; renderApp();" class="text-slate-400 hover:text-white p-1">✏️</button>
+                          <button onclick="deleteEarning(${earning.id});" class="text-slate-400 hover:text-rose-400 p-1">🗑️</button>
+                        </div>
+                      </div>
+                      ${platform.type !== 'none' ? `<p class="text-xs text-slate-500">Líquido: ${formatMoney(net)}</p>` : ''}
+                    </div>
                   </div>
                 </div>
-              `).join('')}
+              `}).join('')}
+              ${appData.earnings.filter(e => getWeekFromDate(e.date) === appData.selectedWeek).length === 0 ? '<p class="text-center text-slate-500 py-4">Nenhum ganho registrado esta semana.</p>' : ''}
           </div>
         </div>
 
-        <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
-          <div class="flex items-center justify-between mb-4">
-            <h2 class="text-xl font-bold">Gastos Variáveis</h2>
-            <button onclick="appData.showAddExpense=!appData.showAddExpense; renderApp();" class="bg-red-600 hover:bg-red-700 rounded-lg px-4 py-2">
-              + Adicionar
+        <!-- Expenses Section -->
+        <div class="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6">
+          <div class="flex items-center justify-between mb-6">
+            <h2 class="text-xl font-bold flex items-center gap-2">
+              <span class="w-2 h-6 bg-rose-500 rounded-full"></span>
+              Variáveis
+            </h2>
+            <button onclick="appData.showAddExpense=!appData.showAddExpense; renderApp();" class="bg-rose-600 hover:bg-rose-700 text-white rounded-lg px-4 py-2 text-sm font-bold transition-colors">
+              + Novo
             </button>
           </div>
+
           ${appData.showAddExpense ? renderExpenseForm() : ''}
-          <div class="space-y-2 max-h-96 overflow-y-auto">
+
+          <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
             ${appData.expenses
               .filter(e => e.week === appData.selectedWeek)
+              .sort((a, b) => new Date(b.date) - new Date(a.date))
               .map(expense => appData.editingExpense === expense.id ? renderExpenseForm(expense) : `
-                <div class="bg-slate-700/50 rounded-lg p-4 flex justify-between items-center">
-                  <div>
-                    <p class="font-medium">${expense.description}</p>
-                    <p class="text-sm text-slate-400">${new Date(expense.date).toLocaleDateString('pt-BR')}</p>
-                  </div>
-                  <div class="flex items-center gap-3">
-                    <p class="text-lg font-bold text-red-400">£${expense.amount}</p>
-                    <button onclick="appData.editingExpense=${expense.id}; renderApp();" class="text-blue-400 hover:text-blue-300">✏️</button>
-                    <button onclick="if(confirm('Deletar este gasto?')) deleteExpense(${expense.id});" class="text-red-400 hover:text-red-300">🗑️</button>
+                <div class="bg-slate-700/30 hover:bg-slate-700/50 rounded-xl p-4 border border-slate-700 transition-all">
+                  <div class="flex justify-between items-center">
+                    <div>
+                      <p class="font-bold text-white">${expense.description}</p>
+                      <p class="text-sm text-slate-400">${new Date(expense.date).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</p>
+                    </div>
+                    <div class="flex items-center gap-3">
+                      <p class="text-lg font-bold text-rose-400">-${formatMoney(expense.amount)}</p>
+                      <div class="flex gap-1">
+                        <button onclick="appData.editingExpense=${expense.id}; renderApp();" class="text-slate-400 hover:text-white p-1">✏️</button>
+                        <button onclick="deleteExpense(${expense.id});" class="text-slate-400 hover:text-rose-400 p-1">🗑️</button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               `).join('')}
+              ${appData.expenses.filter(e => e.week === appData.selectedWeek).length === 0 ? '<p class="text-center text-slate-500 py-4">Nenhum gasto variável esta semana.</p>' : ''}
           </div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderEarningForm(earning = null) {
-    const platform = earning?.platform || 'justeat';
-    const date = earning?.date || new Date().toISOString().split('T')[0];
-    const amount = earning?.amount || '';
-
-    return `
-      <div class="bg-slate-700 rounded-lg p-4 mb-4">
-        <select id="platform" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 mb-3">
-          <option value="justeat" ${platform === 'justeat' ? 'selected' : ''}>Just Eat</option>
-          <option value="uber" ${platform === 'uber' ? 'selected' : ''}>Uber</option>
-          <option value="flex" ${platform === 'flex' ? 'selected' : ''}>Flex</option>
-        </select>
-        <input type="date" id="date" value="${date}" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 mb-3" />
-        <input type="number" step="0.01" id="amount" value="${amount}" placeholder="Valor (£)" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 mb-3" />
-        <div class="flex gap-2">
-          <button onclick="
-            const platform = document.getElementById('platform').value;
-            const date = document.getElementById('date').value;
-            const amount = parseFloat(document.getElementById('amount').value);
-            if (platform && date && amount) {
-              ${earning ? `updateEarning(${earning.id}, {platform, date, amount})` : 'addEarning({platform, date, amount})'};
-            }
-          " class="flex-1 bg-green-600 hover:bg-green-700 rounded px-4 py-2">💾 Salvar</button>
-          <button onclick="appData.${earning ? 'editingEarning' : 'showAddEarning'}=null; renderApp();" class="flex-1 bg-slate-600 hover:bg-slate-500 rounded px-4 py-2">❌ Cancelar</button>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderExpenseForm(expense = null) {
-    const description = expense?.description || '';
-    const date = expense?.date || new Date().toISOString().split('T')[0];
-    const amount = expense?.amount || '';
-
-    return `
-      <div class="bg-slate-700 rounded-lg p-4 mb-4">
-        <input type="text" id="description" value="${description}" placeholder="Descrição" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 mb-3" />
-        <input type="date" id="date" value="${date}" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 mb-3" />
-        <input type="number" step="0.01" id="amount" value="${amount}" placeholder="Valor (£)" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 mb-3" />
-        <div class="flex gap-2">
-          <button onclick="
-            const description = document.getElementById('description').value;
-            const date = document.getElementById('date').value;
-            const amount = parseFloat(document.getElementById('amount').value);
-            if (description && date && amount) {
-              ${expense ? `updateExpense(${expense.id}, {description, date, amount, week: appData.selectedWeek})` : 'addExpense({description, date, amount, week: appData.selectedWeek})'};
-            }
-          " class="flex-1 bg-red-600 hover:bg-red-700 rounded px-4 py-2">💾 Salvar</button>
-          <button onclick="appData.${expense ? 'editingExpense' : 'showAddExpense'}=null; renderApp();" class="flex-1 bg-slate-600 hover:bg-slate-500 rounded px-4 py-2">❌ Cancelar</button>
         </div>
       </div>
     `;
@@ -745,18 +1077,10 @@
 
   function renderMonthly() {
     const months = [
-      { value: 1, name: 'Janeiro' },
-      { value: 2, name: 'Fevereiro' },
-      { value: 3, name: 'Março' },
-      { value: 4, name: 'Abril' },
-      { value: 5, name: 'Maio' },
-      { value: 6, name: 'Junho' },
-      { value: 7, name: 'Julho' },
-      { value: 8, name: 'Agosto' },
-      { value: 9, name: 'Setembro' },
-      { value: 10, name: 'Outubro' },
-      { value: 11, name: 'Novembro' },
-      { value: 12, name: 'Dezembro' }
+      { value: 1, name: 'Janeiro' }, { value: 2, name: 'Fevereiro' }, { value: 3, name: 'Março' },
+      { value: 4, name: 'Abril' }, { value: 5, name: 'Maio' }, { value: 6, name: 'Junho' },
+      { value: 7, name: 'Julho' }, { value: 8, name: 'Agosto' }, { value: 9, name: 'Setembro' },
+      { value: 10, name: 'Outubro' }, { value: 11, name: 'Novembro' }, { value: 12, name: 'Dezembro' }
     ];
 
     const years = [];
@@ -764,7 +1088,7 @@
       const year = new Date(e.date).getFullYear();
       if (!years.includes(year)) years.push(year);
     });
-    years.push(new Date().getFullYear());
+    if (!years.includes(new Date().getFullYear())) years.push(new Date().getFullYear());
     years.sort().reverse();
 
     const monthKey = `${appData.selectedYear}-${String(appData.selectedMonth).padStart(2, '0')}`;
@@ -774,7 +1098,7 @@
       expensesVariable: 0,
       expensesFixed: 0,
       weeks: new Set(),
-      earningsByPlatform: { justeat: 0, uber: 0, flex: 0 }
+      earningsByPlatform: {}
     };
 
     appData.earnings.forEach(earning => {
@@ -783,11 +1107,18 @@
       
       if (earningMonth === monthKey) {
         monthData.earningsGross += earning.amount;
-        let netAmount = earning.amount;
-        if (earning.platform === 'justeat' || earning.platform === 'flex') netAmount *= 0.8;
-        if (earning.platform === 'uber') netAmount -= 75;
-        monthData.earningsNet += netAmount;
-        monthData.earningsByPlatform[earning.platform] += earning.amount;
+        
+        let platformId = earning.platformId;
+        if (!platformId && earning.platform) {
+            const found = appData.platforms.find(p => p.name.toLowerCase() === earning.platform.toLowerCase());
+            platformId = found ? found.id : appData.platforms[0]?.id;
+        }
+
+        const net = calculateNetEarning(earning.amount, platformId);
+        monthData.earningsNet += net;
+        
+        const pName = getPlatform(platformId).name;
+        monthData.earningsByPlatform[pName] = (monthData.earningsByPlatform[pName] || 0) + earning.amount;
         monthData.weeks.add(getWeekFromDate(earning.date));
       }
     });
@@ -798,7 +1129,6 @@
       if (expenseMonth === monthKey) monthData.expensesVariable += expense.amount;
     });
 
-    // Calcular gastos fixos baseado nas semanas
     monthData.weeks.forEach(week => {
       monthData.expensesFixed += getTotalFixedExpenses(week);
     });
@@ -807,27 +1137,22 @@
     const balance = monthData.earningsNet - totalExpenses;
 
     return `
-      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-2 rounded-lg">
-        <button onclick="appData.activeTab='dashboard'; renderApp();" class="px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700">Dashboard</button>
-        <button onclick="appData.activeTab='monthly'; renderApp();" class="px-4 py-2 rounded-lg bg-blue-600 text-white">Resumo Mensal</button>
-        <button onclick="appData.activeTab='fixed'; renderApp();" class="px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700">Gastos Fixos</button>
+      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
+        <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Dashboard</button>
+        <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Mensal</button>
+        <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Fixos</button>
       </nav>
 
-      <header class="mb-8">
-        <h2 class="text-3xl font-bold mb-2">Resumo Mensal</h2>
-        <p class="text-slate-400">Visão geral dos seus ganhos e gastos por mês</p>
-      </header>
-
-      <div class="grid md:grid-cols-2 gap-4 mb-6">
+      <div class="grid grid-cols-2 gap-4 mb-6">
         <div>
-          <label class="block text-sm font-medium mb-2">Ano</label>
-          <select onchange="appData.selectedYear=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white">
+          <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Ano</label>
+          <select onchange="appData.selectedYear=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-blue-500">
             ${years.map(year => `<option value="${year}" ${year === appData.selectedYear ? 'selected' : ''}>${year}</option>`).join('')}
           </select>
         </div>
         <div>
-          <label class="block text-sm font-medium mb-2">Mês</label>
-          <select onchange="appData.selectedMonth=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white">
+          <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Mês</label>
+          <select onchange="appData.selectedMonth=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-blue-500">
             ${months.map(month => `
               <option value="${month.value}" ${month.value === appData.selectedMonth ? 'selected' : ''}>
                 ${month.name} ${(appData.selectedYear === new Date().getFullYear() && month.value === new Date().getMonth() + 1) ? '(Atual)' : ''}
@@ -837,55 +1162,55 @@
         </div>
       </div>
 
-      <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
-        <div class="flex items-center justify-between mb-6">
+      <div class="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-8">
           <div>
-            <h3 class="text-3xl font-bold capitalize">${months.find(m => m.value === appData.selectedMonth).name} de ${appData.selectedYear}</h3>
-            <p class="text-sm text-slate-500 mt-1">${monthData.weeks.size} semana${monthData.weeks.size !== 1 ? 's' : ''} trabalhada${monthData.weeks.size !== 1 ? 's' : ''}</p>
+            <h3 class="text-3xl font-bold capitalize text-white">${months.find(m => m.value === appData.selectedMonth).name}</h3>
+            <p class="text-sm text-slate-400 mt-1">${appData.selectedYear} • ${monthData.weeks.size} semana(s) ativa(s)</p>
           </div>
           <div class="text-right">
-            <p class="text-sm text-slate-400">Saldo do Mês</p>
-            <p class="text-4xl font-bold ${balance >= 0 ? 'text-green-400' : 'text-red-400'}">£${balance.toFixed(2)}</p>
+            <p class="text-sm text-slate-400">Saldo Final</p>
+            <p class="text-4xl font-bold ${balance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${formatMoney(balance)}</p>
           </div>
         </div>
 
-        <div class="grid md:grid-cols-4 gap-4 mb-6">
-          <div class="bg-gradient-to-br from-blue-500/20 to-blue-600/20 border border-blue-500/30 rounded-lg p-4">
-            <p class="text-xs text-blue-400 font-medium mb-1">Faturamento Bruto</p>
-            <p class="text-2xl font-bold">£${monthData.earningsGross.toFixed(2)}</p>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          <div class="bg-blue-900/20 border border-blue-500/20 rounded-xl p-4">
+            <p class="text-xs text-blue-400 font-bold uppercase mb-1">Bruto</p>
+            <p class="text-xl font-bold text-white">${formatMoney(monthData.earningsGross)}</p>
           </div>
-          <div class="bg-gradient-to-br from-green-500/20 to-green-600/20 border border-green-500/30 rounded-lg p-4">
-            <p class="text-xs text-green-400 font-medium mb-1">Ganhos Líquidos</p>
-            <p class="text-2xl font-bold">£${monthData.earningsNet.toFixed(2)}</p>
+          <div class="bg-emerald-900/20 border border-emerald-500/20 rounded-xl p-4">
+            <p class="text-xs text-emerald-400 font-bold uppercase mb-1">Líquido</p>
+            <p class="text-xl font-bold text-white">${formatMoney(monthData.earningsNet)}</p>
           </div>
-          <div class="bg-gradient-to-br from-orange-500/20 to-orange-600/20 border border-orange-500/30 rounded-lg p-4">
-            <p class="text-xs text-orange-400 font-medium mb-1">Gastos Variáveis</p>
-            <p class="text-2xl font-bold">£${monthData.expensesVariable.toFixed(2)}</p>
+          <div class="bg-rose-900/20 border border-rose-500/20 rounded-xl p-4">
+            <p class="text-xs text-rose-400 font-bold uppercase mb-1">Varíaveis</p>
+            <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesVariable)}</p>
           </div>
-          <div class="bg-gradient-to-br from-red-500/20 to-red-600/20 border border-red-500/30 rounded-lg p-4">
-            <p class="text-xs text-red-400 font-medium mb-1">Gastos Fixos</p>
-            <p class="text-2xl font-bold">£${monthData.expensesFixed.toFixed(2)}</p>
+          <div class="bg-purple-900/20 border border-purple-500/20 rounded-xl p-4">
+            <p class="text-xs text-purple-400 font-bold uppercase mb-1">Fixos</p>
+            <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesFixed)}</p>
           </div>
         </div>
 
-        <div class="grid md:grid-cols-2 gap-4">
-          <div class="bg-slate-700/30 rounded-lg p-4">
-            <h4 class="text-sm font-bold text-slate-400 mb-3">Faturamento por Plataforma</h4>
-            <div class="space-y-2">
-              <div class="flex justify-between"><span>Just Eat</span><span class="font-bold">£${monthData.earningsByPlatform.justeat.toFixed(2)}</span></div>
-              <div class="flex justify-between"><span>Uber</span><span class="font-bold">£${monthData.earningsByPlatform.uber.toFixed(2)}</span></div>
-              <div class="flex justify-between"><span>Flex</span><span class="font-bold">£${monthData.earningsByPlatform.flex.toFixed(2)}</span></div>
+        <div class="grid md:grid-cols-2 gap-6">
+          <div>
+            <h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-700 pb-2">Por Fonte</h4>
+            <div class="space-y-3">
+              ${Object.entries(monthData.earningsByPlatform).map(([plat, val]) => val > 0 ? `
+                <div class="flex justify-between items-center text-sm">
+                   <span class="capitalize text-slate-300">${plat}</span>
+                   <span class="font-bold text-white">${formatMoney(val)}</span>
+                </div>
+              ` : '').join('')}
+              ${Object.values(monthData.earningsByPlatform).every(v => v === 0) ? '<p class="text-slate-500 text-sm">Sem dados.</p>' : ''}
             </div>
           </div>
-          <div class="bg-slate-700/30 rounded-lg p-4">
-            <h4 class="text-sm font-bold text-slate-400 mb-3">Resumo Financeiro</h4>
-            <div class="space-y-2">
-              <div class="flex justify-between"><span>Total de Ganhos</span><span class="font-bold text-green-400">£${monthData.earningsNet.toFixed(2)}</span></div>
-              <div class="flex justify-between"><span>Total de Gastos</span><span class="font-bold text-red-400">£${totalExpenses.toFixed(2)}</span></div>
-              <div class="pt-2 border-t border-slate-600 flex justify-between">
-                <span class="font-bold">Diferença</span>
-                <span class="text-lg font-bold ${balance >= 0 ? 'text-green-400' : 'text-red-400'}">${balance >= 0 ? '+' : ''}£${balance.toFixed(2)}</span>
-              </div>
+          <div>
+            <h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-700 pb-2">Balanço</h4>
+            <div class="space-y-3 text-sm">
+              <div class="flex justify-between"><span>Entradas Líquidas</span><span class="font-bold text-emerald-400">+${formatMoney(monthData.earningsNet)}</span></div>
+              <div class="flex justify-between"><span>Saídas Totais</span><span class="font-bold text-rose-400">-${formatMoney(totalExpenses)}</span></div>
             </div>
           </div>
         </div>
@@ -895,47 +1220,53 @@
 
   function renderFixed() {
     return `
-      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-2 rounded-lg">
-        <button onclick="appData.activeTab='dashboard'; renderApp();" class="px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700">Dashboard</button>
-        <button onclick="appData.activeTab='monthly'; renderApp();" class="px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700">Resumo Mensal</button>
-        <button onclick="appData.activeTab='fixed'; renderApp();" class="px-4 py-2 rounded-lg bg-blue-600 text-white">Gastos Fixos</button>
+      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
+        <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Dashboard</button>
+        <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Mensal</button>
+        <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Fixos</button>
       </nav>
 
-      <header class="mb-8">
-        <h2 class="text-3xl font-bold mb-2">Gastos Fixos Semanais (Padrão)</h2>
-        <p class="text-slate-400">Você pode ajustar gastos fixos para semanas específicas no Dashboard</p>
-      </header>
-
-      <div class="grid gap-6 mb-8">
-        <div class="bg-gradient-to-br from-red-500/20 to-red-600/20 border border-red-500/30 rounded-xl p-6">
-          <p class="text-4xl font-bold">£${Object.values(appData.fixedExpenses).flat().reduce((sum, exp) => sum + exp.value, 0).toFixed(2)}</p>
-          <p class="text-sm text-red-400 mt-1">Total de Gastos Fixos por Semana</p>
+      <div class="flex flex-col md:flex-row justify-between items-end mb-8">
+        <div>
+            <h2 class="text-3xl font-bold text-white">Gastos Fixos (Semanais)</h2>
+            <p class="text-slate-400 mt-2 max-w-lg">
+                Estes valores são descontados automaticamente do seu saldo toda semana. Adicione aqui aluguel, contas, seguros, etc (divida o valor mensal por 4 se necessário).
+            </p>
+        </div>
+        <div class="mt-4 md:mt-0 text-right">
+             <p class="text-sm text-slate-400 uppercase tracking-wider">Total Semanal</p>
+             <p class="text-4xl font-bold text-white">${formatMoney(Object.values(appData.fixedExpenses).flat().reduce((sum, exp) => sum + exp.value, 0))}</p>
         </div>
       </div>
 
-      <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
-        <div class="flex items-center justify-between mb-6">
-          <h3 class="text-2xl font-bold">Detalhamento por Banco</h3>
-          <button onclick="appData.showFixedExpensesEditor=!appData.showFixedExpensesEditor; renderApp();" class="bg-blue-600 hover:bg-blue-700 rounded-lg px-6 py-3">
-            ${appData.showFixedExpensesEditor ? 'Fechar Editor' : '⚙️ Editar Gastos'}
+      <div class="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-6 border-b border-slate-700 pb-4">
+          <h3 class="text-xl font-bold text-white">Categorias</h3>
+          <button onclick="appData.showFixedExpensesEditor=!appData.showFixedExpensesEditor; renderApp();" class="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-6 py-2 transition-colors shadow-lg shadow-blue-500/20">
+            ${appData.showFixedExpensesEditor ? 'Concluir Edição' : '✏️ Editar / Adicionar'}
           </button>
         </div>
 
         ${appData.showFixedExpensesEditor ? renderFixedExpensesEditor() : `
           <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+            ${Object.entries(appData.fixedExpenses).length === 0 ? '<p class="text-slate-500 col-span-3 text-center py-8">Nenhum gasto fixo cadastrado. Clique em Editar para começar.</p>' : ''}
             ${Object.entries(appData.fixedExpenses).map(([bank, items]) => `
-              <div class="bg-slate-700/50 rounded-xl p-6 border border-slate-600">
-                <h3 class="font-bold text-xl mb-4 capitalize text-blue-400">${bank}</h3>
+              <div class="bg-slate-700/30 rounded-xl p-5 border border-slate-700 hover:bg-slate-700/50 transition-colors">
+                <h3 class="font-bold text-lg mb-4 capitalize text-blue-400 flex items-center gap-2">
+                    <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+                    ${bank}
+                </h3>
                 <div class="space-y-3">
                   ${items.map(item => `
-                    <div class="flex justify-between items-center py-2 border-b border-slate-600/50">
-                      <span class="text-slate-300">${item.name}</span>
-                      <span class="font-bold text-lg">£${item.value.toFixed(2)}</span>
+                    <div class="flex justify-between items-center text-sm group">
+                      <span class="text-slate-300 group-hover:text-white transition-colors">${item.name}</span>
+                      <span class="font-medium text-white">${formatMoney(item.value)}</span>
                     </div>
                   `).join('')}
-                  <div class="pt-3 mt-3 border-t-2 border-blue-500/30 flex justify-between font-bold text-lg">
-                    <span class="text-blue-400">Total ${bank}</span>
-                    <span class="text-blue-400">£${items.reduce((s, i) => s + i.value, 0).toFixed(2)}</span>
+                  ${items.length === 0 ? '<p class="text-xs text-slate-500">Vazio</p>' : ''}
+                  <div class="pt-3 mt-2 border-t border-slate-600/50 flex justify-between font-bold text-slate-200">
+                    <span>Total</span>
+                    <span>${formatMoney(items.reduce((s, i) => s + i.value, 0))}</span>
                   </div>
                 </div>
               </div>
@@ -948,50 +1279,179 @@
 
   function renderFixedExpensesEditor() {
     return `
-      <div class="space-y-6">
-        ${Object.entries(appData.fixedExpenses).map(([bank, items]) => `
-          <div class="bg-slate-700/50 rounded-lg p-4">
-            <div class="flex items-center justify-between mb-3">
-              <h3 class="font-bold capitalize text-blue-400">${bank}</h3>
-              <button onclick="
-                appData.fixedExpenses['${bank}'].push({name: 'Novo gasto', value: 0});
-                renderApp();
-              " class="bg-green-600 hover:bg-green-700 rounded px-3 py-1 text-sm">+ Adicionar</button>
+      <div class="space-y-6 animate-fade-in">
+        <div class="flex flex-col md:flex-row gap-2 mb-6 bg-slate-700/30 p-4 rounded-xl border border-slate-600">
+            <div class="flex-1">
+                <label class="block text-xs text-slate-400 mb-1">Nova Categoria</label>
+                <div class="flex gap-2">
+                    <input type="text" id="newCategoryInput" placeholder="Ex: Casa, Carro" class="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 outline-none">
+                    <button onclick="const name = document.getElementById('newCategoryInput').value; if(name) { appData.fixedExpenses[name] = []; renderApp(); showToast('Categoria criada!', 'success'); }" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg font-bold">Criar</button>
+                </div>
             </div>
-            <div class="space-y-2" id="${bank}-items">
+            <div class="text-xs text-slate-400 md:w-1/3 flex items-center">
+                Crie categorias para agrupar seus gastos fixos (ex: Casa pode conter Aluguel, Luz, Internet).
+            </div>
+        </div>
+
+        ${Object.entries(appData.fixedExpenses).map(([bank, items]) => `
+          <div class="bg-slate-700/50 rounded-xl p-4 border border-slate-600">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="font-bold capitalize text-blue-400 text-lg">${bank}</h3>
+              <div class="flex gap-2">
+                 <button onclick="appData.fixedExpenses['${bank}'].push({name: 'Novo item', value: 0}); renderApp();" class="text-green-400 hover:text-green-300 text-sm px-2 py-1 bg-green-400/10 rounded">+ Item</button>
+                 <button onclick="window.showConfirm('Remover categoria ${bank}?', () => { delete appData.fixedExpenses['${bank}']; renderApp(); showToast('Categoria removida', 'info'); })" class="text-rose-400 hover:text-rose-300 text-sm px-2 py-1 bg-rose-400/10 rounded">Excluir Categoria</button>
+              </div>
+            </div>
+            <div class="space-y-3" id="${bank}-items">
               ${items.map((item, idx) => `
                 <div class="flex gap-2 items-center">
                   <input
                     type="text"
                     value="${item.name}"
                     onchange="appData.fixedExpenses['${bank}'][${idx}].name = this.value"
-                    class="flex-1 bg-slate-600 border border-slate-500 rounded px-3 py-2 text-sm"
+                    class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-blue-500 outline-none"
+                    placeholder="Nome"
                   />
-                  <span class="text-slate-400">£</span>
                   <input
                     type="number"
                     step="0.01"
                     value="${item.value}"
                     onchange="appData.fixedExpenses['${bank}'][${idx}].value = parseFloat(this.value) || 0"
-                    class="w-24 bg-slate-600 border border-slate-500 rounded px-3 py-2 text-sm"
+                    class="w-24 md:w-32 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-blue-500 outline-none"
+                    placeholder="Valor"
                   />
-                  <button onclick="
-                    appData.fixedExpenses['${bank}'].splice(${idx}, 1);
-                    renderApp();
-                  " class="text-red-400 hover:text-red-300 p-2">🗑️</button>
+                  <button onclick="appData.fixedExpenses['${bank}'].splice(${idx}, 1); renderApp();" class="text-rose-400 hover:text-rose-300 p-2 rounded hover:bg-rose-400/10">✕</button>
                 </div>
               `).join('')}
+              ${items.length === 0 ? '<p class="text-sm text-slate-500 italic">Nenhum item nesta categoria.</p>' : ''}
             </div>
           </div>
         `).join('')}
-        <div class="flex gap-3">
-          <button onclick="updateFixedExpenses(appData.fixedExpenses); appData.showFixedExpensesEditor=false; renderApp();" class="flex-1 bg-green-600 hover:bg-green-700 rounded-lg px-4 py-3">💾 Salvar Alterações</button>
-          <button onclick="appData.showFixedExpensesEditor=false; renderApp();" class="flex-1 bg-slate-600 hover:bg-slate-500 rounded-lg px-4 py-3">❌ Cancelar</button>
+
+        <div class="fixed bottom-6 right-6 md:relative md:bottom-auto md:right-auto flex gap-3 md:justify-end z-40">
+          <button onclick="updateFixedExpenses(appData.fixedExpenses); appData.showFixedExpensesEditor=false; renderApp();" class="bg-green-600 hover:bg-green-700 text-white rounded-xl px-8 py-3 font-bold shadow-xl shadow-green-500/30 transition-transform hover:scale-105">Salvar Alterações</button>
+        </div>
+        <div class="h-20 md:h-0"></div>
+      </div>
+    `;
+  }
+
+  function renderEarningForm(earning = null) {
+    // Tenta encontrar a plataforma correta pelo ID (novo) ou pelo nome antigo (migração)
+    let platformId = earning?.platformId;
+    if (!platformId && earning?.platform) {
+        // Fallback para dados antigos
+        const found = appData.platforms.find(p => p.name.toLowerCase() === earning.platform.toLowerCase());
+        platformId = found ? found.id : appData.platforms[0]?.id;
+    }
+    
+    // Se ainda não tiver ID e for novo, usa o primeiro da lista
+    if (!platformId && !earning) platformId = appData.platforms[0]?.id;
+
+    const date = earning?.date || new Date().toISOString().split('T')[0];
+    const amount = earning?.amount || '';
+
+    return `
+      <div class="bg-slate-700 rounded-xl p-4 mb-4 border-l-4 border-emerald-500 animate-fade-in">
+        <label class="block text-xs text-slate-400 mb-1">Fonte de Renda</label>
+        <div class="flex gap-2 mb-3">
+            <select id="platformId" class="flex-1 bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500">
+            ${appData.platforms.map(p => `<option value="${p.id}" ${platformId === p.id ? 'selected' : ''}>${p.name}</option>`).join('')}
+            </select>
+            <button onclick="appData.showPlatformManager = true; renderApp();" class="bg-slate-600 hover:bg-slate-500 px-3 rounded border border-slate-500 text-sm" title="Gerenciar Fontes">Gerenciar</button>
+        </div>
+        
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Data</label>
+            <input type="date" id="date" value="${date}" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Valor Bruto</label>
+            <input type="number" step="0.01" id="amount" value="${amount}" placeholder="0.00" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500" />
+          </div>
+        </div>
+
+        <div class="flex gap-2">
+          <button onclick="
+            const platformId = document.getElementById('platformId').value;
+            const date = document.getElementById('date').value;
+            const amount = parseFloat(document.getElementById('amount').value);
+            if (platformId && date && amount) {
+              ${earning ? `updateEarning(${earning.id}, {platformId, date, amount})` : 'addEarning({platformId, date, amount})'};
+            } else {
+                showToast('Preencha todos os campos!', 'error');
+            }
+          " class="flex-1 bg-emerald-600 hover:bg-emerald-700 rounded-lg px-4 py-2 font-bold transition-colors">Salvar</button>
+          <button onclick="appData.${earning ? 'editingEarning' : 'showAddEarning'}=null; renderApp();" class="flex-1 bg-slate-600 hover:bg-slate-500 rounded-lg px-4 py-2 transition-colors">Cancelar</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderExpenseForm(expense = null) {
+    const description = expense?.description || '';
+    const date = expense?.date || new Date().toISOString().split('T')[0];
+    const amount = expense?.amount || '';
+
+    return `
+      <div class="bg-slate-700 rounded-xl p-4 mb-4 border-l-4 border-rose-500 animate-fade-in">
+        <label class="block text-xs text-slate-400 mb-1">Descrição</label>
+        <input type="text" id="description" value="${description}" placeholder="Ex: Gasolina, Almoço..." class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 mb-3 text-white outline-none focus:border-rose-500" />
+        
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Data</label>
+            <input type="date" id="date" value="${date}" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-rose-500" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Valor</label>
+            <input type="number" step="0.01" id="amount" value="${amount}" placeholder="0.00" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-rose-500" />
+          </div>
+        </div>
+
+        <div class="flex gap-2">
+          <button onclick="
+            const description = document.getElementById('description').value;
+            const date = document.getElementById('date').value;
+            const amount = parseFloat(document.getElementById('amount').value);
+            if (description && date && amount) {
+              ${expense ? `updateExpense(${expense.id}, {description, date, amount, week: appData.selectedWeek})` : 'addExpense({description, date, amount, week: appData.selectedWeek})'};
+            } else {
+                showToast('Preencha todos os campos!', 'error');
+            }
+          " class="flex-1 bg-rose-600 hover:bg-rose-700 rounded-lg px-4 py-2 font-bold transition-colors">Salvar</button>
+          <button onclick="appData.${expense ? 'editingExpense' : 'showAddExpense'}=null; renderApp();" class="flex-1 bg-slate-600 hover:bg-slate-500 rounded-lg px-4 py-2 transition-colors">Cancelar</button>
         </div>
       </div>
     `;
   }
 </script>
+
+<style>
+  /* Custom Scrollbar for list areas */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: rgba(30, 41, 59, 0.5); 
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(71, 85, 105, 0.8); 
+    border-radius: 10px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(100, 116, 139, 1); 
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-fade-in {
+    animation: fade-in 0.3s ease-out forwards;
+  }
+</style>
 
 </body>
 </html>
