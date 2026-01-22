@@ -871,7 +871,7 @@
     const weekEarningsGross = appData.earnings
       .filter(e => getWeekFromDate(e.date) === appData.selectedWeek)
       .reduce((sum, e) => sum + e.amount, 0);
-    const progressPercentage = Math.min((weekEarningsGross / appData.weekGoal) * 100, 100);
+    const progressPercentage = Math.min((weekEarnings / appData.weekGoal) * 100, 100);
     const hasWeeklyAdjustment = appData.weeklyFixedExpenses[appData.selectedWeek];
 
     const hasData = appData.earnings.length > 0 || appData.expenses.length > 0;
