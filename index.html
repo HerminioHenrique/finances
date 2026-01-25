@@ -322,6 +322,53 @@
     window.deleteExpenseFromFirebase = async (id) => {
       await deleteFromFirebase('expenses', id.toString());
     };
+
+    // ============= MARKDOWN & NOTES SYSTEM =============
+    window.insertFormatting = (format) => {
+        const textarea = document.getElementById('weeklyFixedNote');
+        if (!textarea) return;
+
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const text = textarea.value;
+        const before = text.substring(0, start);
+        const selection = text.substring(start, end);
+        const after = text.substring(end);
+
+        let newText = '';
+        let newCursorPos = 0;
+
+        if (format === 'bold') {
+            newText = `${before}**${selection}**${after}`;
+            newCursorPos = selection ? end + 4 : start + 2;
+        } else if (format === 'italic') {
+            newText = `${before}*${selection}*${after}`;
+            newCursorPos = selection ? end + 2 : start + 1;
+        } else if (format === 'underline') {
+            newText = `${before}__${selection}__${after}`;
+            newCursorPos = selection ? end + 4 : start + 2;
+        }
+
+        textarea.value = newText;
+        textarea.focus();
+        textarea.setSelectionRange(newCursorPos, newCursorPos);
+    };
+
+    window.parseNoteMarkdown = (text) => {
+        if (!text) return '';
+        // 1. Sanitize HTML to prevent XSS (very important!)
+        let sanitized = text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+
+        // 2. Parse Markdown
+        return sanitized
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') // Bold
+            .replace(/\*(.*?)\*/g, '<em>$1</em>') // Italic
+            .replace(/__(.*?)__/g, '<u>$1</u>') // Underline
+            .replace(/\n/g, '<br>'); // Line breaks
+    };
   </script>
 </head>
 <body class="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white min-h-screen font-sans">
@@ -1071,11 +1118,20 @@
              </div>
              
              ${hasWeeklyAdjustment ? `
-                 <div class="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-center mb-4">
-                    <p class="text-xs text-yellow-200 mb-1">Total Manual Ativo</p>
-                    <p class="text-xl font-bold text-yellow-400">${formatMoney(totalFixedExpenses)}</p>
-                    ${weeklyAdjustmentNote ? `<p class="text-xs text-yellow-200/70 mt-2 border-t border-yellow-500/20 pt-2 text-left italic">Nota: ${weeklyAdjustmentNote}</p>` : ''}
+                 <div class="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-4 text-center mb-4">
+                    <p class="text-xs text-yellow-200 mb-1 font-bold uppercase tracking-wider">Total Manual Definido</p>
+                    <p class="text-2xl font-bold text-yellow-400">${formatMoney(totalFixedExpenses)}</p>
                  </div>
+                 
+                 ${weeklyAdjustmentNote ? `
+                 <div class="bg-slate-900/50 rounded-lg p-4 border border-slate-700 relative group">
+                     <div class="absolute top-0 left-0 w-1 h-full bg-blue-500/50 rounded-l-lg"></div>
+                     <p class="text-xs text-blue-400 font-bold uppercase mb-2 flex items-center gap-1">
+                         📝 Notas do Ajuste
+                     </p>
+                     <p class="text-sm text-slate-300 leading-relaxed">${parseNoteMarkdown(weeklyAdjustmentNote)}</p>
+                 </div>
+                 ` : ''}
              ` : `
                  <div class="max-h-48 overflow-y-auto custom-scrollbar pr-2 space-y-2">
                     ${Object.entries(appData.fixedExpenses).length === 0 ? '<p class="text-xs text-slate-500">Sem contas fixas cadastradas.</p>' : ''}
@@ -1120,11 +1176,19 @@
                 class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 focus:border-blue-500 outline-none"
                 />
             </div>
-            <textarea
-                id="weeklyFixedNote"
-                placeholder="Bloco de notas (ex: paguei o aluguel adiantado, usei dinheiro do carro...)"
-                class="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-sm focus:border-blue-500 outline-none min-h-[80px]"
-            >${weeklyAdjustmentNote}</textarea>
+            
+            <div>
+                 <div class="flex gap-2 mb-2">
+                    <button onclick="insertFormatting('bold')" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300 hover:text-white border border-slate-600 text-xs font-bold" title="Negrito">B</button>
+                    <button onclick="insertFormatting('italic')" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300 hover:text-white border border-slate-600 text-xs italic" title="Itálico">I</button>
+                    <button onclick="insertFormatting('underline')" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300 hover:text-white border border-slate-600 text-xs underline" title="Sublinhado">U</button>
+                 </div>
+                <textarea
+                    id="weeklyFixedNote"
+                    placeholder="Bloco de notas (use **negrito**, *itálico*...)"
+                    class="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-sm focus:border-blue-500 outline-none min-h-[80px]"
+                >${weeklyAdjustmentNote}</textarea>
+            </div>
             
             <div class="flex gap-3">
                 <button onclick="saveWeeklyAdjustment()" class="flex-1 bg-green-600 hover:bg-green-700 rounded-lg px-6 py-2">Salvar Ajuste</button>
