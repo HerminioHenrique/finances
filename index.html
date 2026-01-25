@@ -506,27 +506,39 @@
     editingPlatformId: null
   };
 
+  // Helper para formatar data localmente YYYY-MM-DD sem shift de UTC
+  function toLocalISO(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
   function getCurrentWeek() {
     const now = new Date();
     const start = new Date(now);
-    start.setDate(now.getDate() - now.getDay() + 1);
+    const day = start.getDay() || 7; // Domingo vira 7
+    start.setDate(now.getDate() - day + 1); // Volta para Segunda-feira
     start.setHours(0, 0, 0, 0);
-    return start.toISOString().split('T')[0];
+    return toLocalISO(start);
   }
 
   function getWeekEnd(weekStart) {
-    const start = new Date(weekStart);
+    const parts = weekStart.split('-');
+    const start = new Date(parts[0], parts[1] - 1, parts[2]);
     const end = new Date(start);
     end.setDate(start.getDate() + 6);
-    return end.toISOString().split('T')[0];
+    return toLocalISO(end);
   }
 
   function getWeekFromDate(dateStr) {
-    const date = new Date(dateStr);
+    const parts = dateStr.split('-');
+    const date = new Date(parts[0], parts[1] - 1, parts[2]);
     const start = new Date(date);
-    start.setDate(date.getDate() - date.getDay() + 1);
+    const day = start.getDay() || 7; // Domingo vira 7
+    start.setDate(date.getDate() - day + 1);
     start.setHours(0, 0, 0, 0);
-    return start.toISOString().split('T')[0];
+    return toLocalISO(start);
   }
 
   function getTotalFixedExpenses(weekStart) {
@@ -1290,208 +1302,6 @@
               ${appData.expenses.filter(e => e.week === appData.selectedWeek).length === 0 ? '<p class="text-center text-slate-500 py-4">Nenhum gasto variável esta semana.</p>' : ''}
           </div>
         </div>
-      </div>
-    `;
-  }
-
-  function renderMonthly() {
-    const months = [
-      { value: 1, name: 'Janeiro' }, { value: 2, name: 'Fevereiro' }, { value: 3, name: 'Março' },
-      { value: 4, name: 'Abril' }, { value: 5, name: 'Maio' }, { value: 6, name: 'Junho' },
-      { value: 7, name: 'Julho' }, { value: 8, name: 'Agosto' }, { value: 9, name: 'Setembro' },
-      { value: 10, name: 'Outubro' }, { value: 11, name: 'Novembro' }, { value: 12, name: 'Dezembro' }
-    ];
-
-    const years = [];
-    appData.earnings.forEach(e => {
-      const year = new Date(e.date).getFullYear();
-      if (!years.includes(year)) years.push(year);
-    });
-    if (!years.includes(new Date().getFullYear())) years.push(new Date().getFullYear());
-    years.sort().reverse();
-
-    const monthKey = `${appData.selectedYear}-${String(appData.selectedMonth).padStart(2, '0')}`;
-    const monthData = {
-      earningsGross: 0,
-      earningsNet: 0,
-      expensesVariable: 0,
-      expensesFixed: 0,
-      weeks: new Set(),
-      earningsByPlatform: {}
-    };
-
-    appData.earnings.forEach(earning => {
-      const date = new Date(earning.date);
-      const earningMonth = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-      
-      if (earningMonth === monthKey) {
-        monthData.earningsGross += earning.amount;
-        
-        let platformId = earning.platformId;
-        if (!platformId && earning.platform) {
-            const found = appData.platforms.find(p => p.name.toLowerCase() === earning.platform.toLowerCase());
-            platformId = found ? found.id : appData.platforms[0]?.id;
-        }
-
-        const net = calculateNetEarning(earning.amount, platformId);
-        monthData.earningsNet += net;
-        
-        const pName = getPlatform(platformId).name;
-        monthData.earningsByPlatform[pName] = (monthData.earningsByPlatform[pName] || 0) + earning.amount;
-        monthData.weeks.add(getWeekFromDate(earning.date));
-      }
-    });
-
-    appData.expenses.forEach(expense => {
-      const date = new Date(expense.date);
-      const expenseMonth = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-      if (expenseMonth === monthKey) monthData.expensesVariable += expense.amount;
-    });
-
-    monthData.weeks.forEach(week => {
-      monthData.expensesFixed += getTotalFixedExpenses(week);
-    });
-
-    const totalExpenses = monthData.expensesVariable + monthData.expensesFixed;
-    const balance = monthData.earningsNet - totalExpenses;
-
-    return `
-      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
-        <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Dashboard</button>
-        <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Mensal</button>
-        <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Fixos</button>
-      </nav>
-
-      <div class="grid grid-cols-2 gap-4 mb-6">
-        <div>
-          <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Ano</label>
-          <select onchange="appData.selectedYear=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-blue-500">
-            ${years.map(year => `<option value="${year}" ${year === appData.selectedYear ? 'selected' : ''}>${year}</option>`).join('')}
-          </select>
-        </div>
-        <div>
-          <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Mês</label>
-          <select onchange="appData.selectedMonth=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-blue-500">
-            ${months.map(month => `
-              <option value="${month.value}" ${month.value === appData.selectedMonth ? 'selected' : ''}>
-                ${month.name} ${(appData.selectedYear === new Date().getFullYear() && month.value === new Date().getMonth() + 1) ? '(Atual)' : ''}
-              </option>
-            `).join('')}
-          </select>
-        </div>
-      </div>
-
-      <div class="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
-        <div class="flex items-center justify-between mb-8">
-          <div>
-            <h3 class="text-3xl font-bold capitalize text-white">${months.find(m => m.value === appData.selectedMonth).name}</h3>
-            <p class="text-sm text-slate-400 mt-1">${appData.selectedYear} • ${monthData.weeks.size} semana(s) ativa(s)</p>
-          </div>
-          <div class="text-right">
-            <p class="text-sm text-slate-400">Saldo Final</p>
-            <p class="text-4xl font-bold ${balance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${formatMoney(balance)}</p>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <div class="bg-blue-900/20 border border-blue-500/20 rounded-xl p-4">
-            <p class="text-xs text-blue-400 font-bold uppercase mb-1">Bruto</p>
-            <p class="text-xl font-bold text-white">${formatMoney(monthData.earningsGross)}</p>
-          </div>
-          <div class="bg-emerald-900/20 border border-emerald-500/20 rounded-xl p-4">
-            <p class="text-xs text-emerald-400 font-bold uppercase mb-1">Líquido</p>
-            <p class="text-xl font-bold text-white">${formatMoney(monthData.earningsNet)}</p>
-          </div>
-          <div class="bg-rose-900/20 border border-rose-500/20 rounded-xl p-4">
-            <p class="text-xs text-rose-400 font-bold uppercase mb-1">Varíaveis</p>
-            <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesVariable)}</p>
-          </div>
-          <div class="bg-purple-900/20 border border-purple-500/20 rounded-xl p-4">
-            <p class="text-xs text-purple-400 font-bold uppercase mb-1">Fixos</p>
-            <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesFixed)}</p>
-          </div>
-        </div>
-
-        <div class="grid md:grid-cols-2 gap-6">
-          <div>
-            <h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-700 pb-2">Por Fonte</h4>
-            <div class="space-y-3">
-              ${Object.entries(monthData.earningsByPlatform).map(([plat, val]) => val > 0 ? `
-                <div class="flex justify-between items-center text-sm">
-                   <span class="capitalize text-slate-300">${plat}</span>
-                   <span class="font-bold text-white">${formatMoney(val)}</span>
-                </div>
-              ` : '').join('')}
-              ${Object.values(monthData.earningsByPlatform).every(v => v === 0) ? '<p class="text-slate-500 text-sm">Sem dados.</p>' : ''}
-            </div>
-          </div>
-          <div>
-            <h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-700 pb-2">Balanço</h4>
-            <div class="space-y-3 text-sm">
-              <div class="flex justify-between"><span>Entradas Líquidas</span><span class="font-bold text-emerald-400">+${formatMoney(monthData.earningsNet)}</span></div>
-              <div class="flex justify-between"><span>Saídas Totais</span><span class="font-bold text-rose-400">-${formatMoney(totalExpenses)}</span></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderFixed() {
-    return `
-      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
-        <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Dashboard</button>
-        <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Mensal</button>
-        <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Fixos</button>
-      </nav>
-
-      <div class="flex flex-col md:flex-row justify-between items-end mb-8">
-        <div>
-            <h2 class="text-3xl font-bold text-white">Gastos Fixos (Semanais)</h2>
-            <p class="text-slate-400 mt-2 max-w-lg">
-                Estes valores são descontados automaticamente do seu saldo toda semana. Adicione aqui aluguel, contas, seguros, etc (divida o valor mensal por 4 se necessário).
-            </p>
-        </div>
-        <div class="mt-4 md:mt-0 text-right">
-             <p class="text-sm text-slate-400 uppercase tracking-wider">Total Semanal</p>
-             <p class="text-4xl font-bold text-white">${formatMoney(Object.values(appData.fixedExpenses).flat().reduce((sum, exp) => sum + exp.value, 0))}</p>
-        </div>
-      </div>
-
-      <div class="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
-        <div class="flex items-center justify-between mb-6 border-b border-slate-700 pb-4">
-          <h3 class="text-xl font-bold text-white">Categorias</h3>
-          <button onclick="appData.showFixedExpensesEditor=!appData.showFixedExpensesEditor; renderApp();" class="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-6 py-2 transition-colors shadow-lg shadow-blue-500/20">
-            ${appData.showFixedExpensesEditor ? 'Concluir Edição' : '✏️ Editar / Adicionar'}
-          </button>
-        </div>
-
-        ${appData.showFixedExpensesEditor ? renderFixedExpensesEditor() : `
-          <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            ${Object.entries(appData.fixedExpenses).length === 0 ? '<p class="text-slate-500 col-span-3 text-center py-8">Nenhum gasto fixo cadastrado. Clique em Editar para começar.</p>' : ''}
-            ${Object.entries(appData.fixedExpenses).map(([bank, items]) => `
-              <div class="bg-slate-700/30 rounded-xl p-5 border border-slate-700 hover:bg-slate-700/50 transition-colors">
-                <h3 class="font-bold text-lg mb-4 capitalize text-blue-400 flex items-center gap-2">
-                    <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
-                    ${bank}
-                </h3>
-                <div class="space-y-3">
-                  ${items.map(item => `
-                    <div class="flex justify-between items-center text-sm group">
-                      <span class="text-slate-300 group-hover:text-white transition-colors">${item.name}</span>
-                      <span class="font-medium text-white">${formatMoney(item.value)}</span>
-                    </div>
-                  `).join('')}
-                  ${items.length === 0 ? '<p class="text-xs text-slate-500">Vazio</p>' : ''}
-                  <div class="pt-3 mt-2 border-t border-slate-600/50 flex justify-between font-bold text-slate-200">
-                    <span>Total</span>
-                    <span>${formatMoney(items.reduce((s, i) => s + i.value, 0))}</span>
-                  </div>
-                </div>
-              </div>
-            `).join('')}
-          </div>
-        `}
       </div>
     `;
   }
