@@ -234,7 +234,12 @@
       const prefSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'preferences'));
 
       window.appData.earnings = [];
-      earningsSnap.forEach(doc => window.appData.earnings.push({ id: doc.id, ...doc.data() }));
+      earningsSnap.forEach(doc => {
+          const data = doc.data();
+          // Backward compatibility: default received to true if not exists
+          const received = data.received !== undefined ? data.received : true; 
+          window.appData.earnings.push({ id: doc.id, ...data, received });
+      });
       
       window.appData.expenses = [];
       expensesSnap.forEach(doc => window.appData.expenses.push({ id: doc.id, ...doc.data() }));
@@ -269,6 +274,10 @@
       window.appData.weeklyFixedExpenses = {};
       weeklyFixedSnap.forEach(doc => {
         window.appData.weeklyFixedExpenses[doc.id] = doc.data();
+        // Garantir que paidItems existe
+        if (!window.appData.weeklyFixedExpenses[doc.id].paidItems) {
+            window.appData.weeklyFixedExpenses[doc.id].paidItems = [];
+        }
       });
 
       if (goalSnap.exists()) {
@@ -478,11 +487,36 @@
       .flat()
       .reduce((sum, exp) => sum + exp.value, 0);
     
-    if (appData.weeklyFixedExpenses[weekStart]) {
+    if (appData.weeklyFixedExpenses[weekStart] && appData.weeklyFixedExpenses[weekStart].total !== undefined) {
       total = appData.weeklyFixedExpenses[weekStart].total;
     }
     
     return total;
+  }
+
+  function getPaidFixedExpensesAmount(weekStart) {
+    // Se houver override manual de total, não conseguimos saber o individual, assumimos o que foi marcado nos items padrão ou o total override se tudo marcado?
+    // Para simplificar: Soma os itens marcados como 'paid' no weeklyFixedExpenses
+    // Se o usuário usou "Weekly Adjustment" (total manual), o sistema de checkbox serve apenas como lista visual,
+    // mas não podemos calcular exatamente a menos que o ajuste manual seja igual à soma.
+    // Vamos priorizar os checkboxes dos itens individuais para o calculo de "Pago".
+    
+    const weekData = appData.weeklyFixedExpenses[weekStart];
+    if (!weekData || !weekData.paidItems) return 0;
+
+    let totalPaid = 0;
+    const allFixed = Object.values(appData.fixedExpenses).flat();
+    
+    weekData.paidItems.forEach(paidId => {
+        const item = allFixed.find(i => `${i.name}` === paidId); // Simple matching by name as ID isn't unique enough globally but per user config it is fine
+        // Melhorar: usar Categoria:Nome para unicidade
+        const [cat, name] = paidId.split(':');
+        if (appData.fixedExpenses[cat]) {
+            const expense = appData.fixedExpenses[cat].find(e => e.name === name);
+            if (expense) totalPaid += expense.value;
+        }
+    });
+    return totalPaid;
   }
 
   function getPlatform(id) {
@@ -524,6 +558,14 @@
   function calculateWeekEarnings(weekStart) {
     return appData.earnings
       .filter(e => getWeekFromDate(e.date) === weekStart)
+      .reduce((sum, e) => {
+        return sum + calculateNetEarning(e.amount, e.platformId);
+      }, 0);
+  }
+  
+  function calculateWeekReceivedEarnings(weekStart) {
+    return appData.earnings
+      .filter(e => getWeekFromDate(e.date) === weekStart && e.received)
       .reduce((sum, e) => {
         return sum + calculateNetEarning(e.amount, e.platformId);
       }, 0);
@@ -609,6 +651,16 @@
     showToast('Entrada atualizada!', 'success');
     renderApp();
   };
+  
+  window.toggleEarningReceived = async (id) => {
+     const index = appData.earnings.findIndex(e => e.id === id);
+     if(index >= 0) {
+         const newVal = !appData.earnings[index].received;
+         appData.earnings[index].received = newVal;
+         await window.syncEarning(appData.earnings[index]);
+         renderApp();
+     }
+  };
 
   window.deleteEarning = async (id) => {
     window.showConfirm('Tem certeza que deseja deletar esta entrada?', async () => {
@@ -655,9 +707,14 @@
   window.saveWeeklyAdjustment = async () => {
     const weekStart = appData.selectedWeek;
     const newTotal = parseFloat(document.getElementById('weeklyFixedTotal').value) || 0;
+    const note = document.getElementById('weeklyFixedNote').value || '';
     
-    appData.weeklyFixedExpenses[weekStart] = { total: newTotal };
-    await window.syncWeeklyFixedExpense(weekStart, { total: newTotal });
+    // Preserve paidItems if exists
+    const currentData = appData.weeklyFixedExpenses[weekStart] || {};
+    const newData = { ...currentData, total: newTotal, note: note };
+    
+    appData.weeklyFixedExpenses[weekStart] = newData;
+    await window.syncWeeklyFixedExpense(weekStart, newData);
     
     await window.checkAndAutoUpdateGoal();
 
@@ -668,14 +725,38 @@
 
   window.removeWeeklyAdjustment = async () => {
     const weekStart = appData.selectedWeek;
-    delete appData.weeklyFixedExpenses[weekStart];
-    await window.deleteFromFirebase('weeklyFixedExpenses', weekStart);
+    // Just remove total and note, keep paidItems
+    if (appData.weeklyFixedExpenses[weekStart]) {
+        delete appData.weeklyFixedExpenses[weekStart].total;
+        delete appData.weeklyFixedExpenses[weekStart].note;
+        await window.syncWeeklyFixedExpense(weekStart, appData.weeklyFixedExpenses[weekStart]);
+    }
     
     await window.checkAndAutoUpdateGoal();
     
     appData.showWeeklyAdjustment = false;
     showToast('Ajuste removido, usando valor padrão.', 'info');
     renderApp();
+  };
+  
+  window.toggleFixedExpensePayment = async (week, category, name) => {
+     const id = `${category}:${name}`;
+     if (!appData.weeklyFixedExpenses[week]) {
+         appData.weeklyFixedExpenses[week] = { paidItems: [] };
+     }
+     if (!appData.weeklyFixedExpenses[week].paidItems) {
+         appData.weeklyFixedExpenses[week].paidItems = [];
+     }
+     
+     const list = appData.weeklyFixedExpenses[week].paidItems;
+     if (list.includes(id)) {
+         appData.weeklyFixedExpenses[week].paidItems = list.filter(i => i !== id);
+     } else {
+         list.push(id);
+     }
+     
+     await window.syncWeeklyFixedExpense(week, appData.weeklyFixedExpenses[week]);
+     renderApp();
   };
 
   window.updateFixedExpenses = async (newFixed) => {
@@ -865,14 +946,24 @@
 
   function renderDashboard() {
     const weekEarnings = calculateWeekEarnings(appData.selectedWeek);
+    const weekReceived = calculateWeekReceivedEarnings(appData.selectedWeek);
     const weekExpenses = calculateWeekExpenses(appData.selectedWeek);
     const totalFixedExpenses = getTotalFixedExpenses(appData.selectedWeek);
+    const paidFixedExpenses = getPaidFixedExpensesAmount(appData.selectedWeek);
+    const pendingFixedExpenses = totalFixedExpenses - paidFixedExpenses;
+    
+    // Logic for Cash Flow
+    // Dinheiro na Mão = Ganhos Recebidos - Gastos Variáveis (Ja assumimos que gasto variavel sai na hora) - Contas Fixas PAGAS
+    const cashOnHand = weekReceived - weekExpenses - paidFixedExpenses;
+
     const weekBalance = weekEarnings - weekExpenses - totalFixedExpenses;
-    const weekEarningsGross = appData.earnings
-      .filter(e => getWeekFromDate(e.date) === appData.selectedWeek)
-      .reduce((sum, e) => sum + e.amount, 0);
     const progressPercentage = Math.min((weekEarnings / appData.weekGoal) * 100, 100);
-    const hasWeeklyAdjustment = appData.weeklyFixedExpenses[appData.selectedWeek];
+    const hasWeeklyAdjustment = appData.weeklyFixedExpenses[appData.selectedWeek] && appData.weeklyFixedExpenses[appData.selectedWeek].total !== undefined;
+    const weeklyAdjustmentNote = hasWeeklyAdjustment ? (appData.weeklyFixedExpenses[appData.selectedWeek].note || '') : '';
+    
+    // For Fixed Checklist
+    const weekFixedData = appData.weeklyFixedExpenses[appData.selectedWeek] || { paidItems: [] };
+    const paidItems = weekFixedData.paidItems || [];
 
     const hasData = appData.earnings.length > 0 || appData.expenses.length > 0;
     const isTotalEmpty = Object.keys(appData.fixedExpenses).length === 0 && !hasData;
@@ -916,7 +1007,7 @@
           <div>
             <h2 class="text-3xl font-bold text-white mb-1">Resumo Semanal</h2>
             <p class="text-sm text-blue-300">
-             Saldo líquido estimado
+             Total Líquido vs Gastos
             </p>
           </div>
           <div class="text-left md:text-right mt-4 md:mt-0">
@@ -940,27 +1031,75 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8">
-        <div class="bg-slate-800/50 border border-emerald-500/20 rounded-xl p-5 hover:bg-slate-800 transition-colors">
-          <span class="text-emerald-400 text-xs font-bold uppercase tracking-wider">Líquido</span>
-          <p class="text-2xl font-bold mt-1 text-white">${formatMoney(weekEarnings)}</p>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+        <!-- FLUXO DE CAIXA -->
+        <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-5 hover:bg-slate-800 transition-colors">
+            <h3 class="text-lg font-bold text-white mb-4 flex items-center gap-2">
+                <svg class="w-5 h-5 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                Fluxo de Caixa (Na Mão)
+            </h3>
+            <div class="space-y-2 mb-4">
+                 <div class="flex justify-between text-sm text-slate-300">
+                    <span>Entradas Recebidas</span>
+                    <span class="text-emerald-400 font-medium">+${formatMoney(weekReceived)}</span>
+                 </div>
+                 <div class="flex justify-between text-sm text-slate-300">
+                    <span>Gastos Variáveis</span>
+                    <span class="text-rose-400 font-medium">-${formatMoney(weekExpenses)}</span>
+                 </div>
+                 <div class="flex justify-between text-sm text-slate-300">
+                    <span>Contas Fixas Pagas</span>
+                    <span class="text-rose-400 font-medium">-${formatMoney(paidFixedExpenses)}</span>
+                 </div>
+            </div>
+            <div class="pt-3 border-t border-slate-700 flex justify-between items-center">
+                <span class="text-sm font-bold uppercase text-slate-400">Saldo Disponível</span>
+                <span class="text-2xl font-bold ${cashOnHand >= 0 ? 'text-white' : 'text-rose-500'}">${formatMoney(cashOnHand)}</span>
+            </div>
         </div>
 
-        <div class="bg-slate-800/50 border border-rose-500/20 rounded-xl p-5 hover:bg-slate-800 transition-colors">
-          <span class="text-rose-400 text-xs font-bold uppercase tracking-wider">Gastos Totais</span>
-          <p class="text-2xl font-bold mt-1 text-white">${formatMoney(weekExpenses + totalFixedExpenses)}</p>
-          <p class="text-xs text-slate-500 mt-1">Fixos: ${formatMoney(totalFixedExpenses)}</p>
-        </div>
-
-        <div class="col-span-2 md:col-span-1 bg-slate-800/50 border border-slate-700 rounded-xl p-5 hover:bg-slate-800 transition-colors cursor-pointer" onclick="appData.showWeeklyAdjustment=!appData.showWeeklyAdjustment; renderApp();">
-           <div class="flex justify-between items-start">
-              <div>
-                <span class="text-blue-400 text-xs font-bold uppercase tracking-wider">Ajuste Fixo Semanal</span>
-                <p class="text-xl font-bold mt-1 text-white">${hasWeeklyAdjustment ? 'Ativo' : 'Padrão'}</p>
-              </div>
-              <span class="text-lg">⚙️</span>
-           </div>
-           ${hasWeeklyAdjustment ? `<p class="text-xs text-yellow-400 mt-1">Ajustado para ${formatMoney(appData.weeklyFixedExpenses[appData.selectedWeek].total)}</p>` : ''}
+        <!-- CONTROLE DE PAGAMENTOS -->
+        <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-5 hover:bg-slate-800 transition-colors">
+             <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-white flex items-center gap-2">
+                    <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
+                    Contas Fixas
+                </h3>
+                <button onclick="appData.showWeeklyAdjustment=!appData.showWeeklyAdjustment; renderApp();" class="text-xs text-blue-400 hover:text-blue-300">
+                   ${hasWeeklyAdjustment ? 'Ajustado (Editar)' : 'Ajustar Total'}
+                </button>
+             </div>
+             
+             ${hasWeeklyAdjustment ? `
+                 <div class="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-center mb-4">
+                    <p class="text-xs text-yellow-200 mb-1">Total Manual Ativo</p>
+                    <p class="text-xl font-bold text-yellow-400">${formatMoney(totalFixedExpenses)}</p>
+                    ${weeklyAdjustmentNote ? `<p class="text-xs text-yellow-200/70 mt-2 border-t border-yellow-500/20 pt-2 text-left italic">Nota: ${weeklyAdjustmentNote}</p>` : ''}
+                 </div>
+             ` : `
+                 <div class="max-h-48 overflow-y-auto custom-scrollbar pr-2 space-y-2">
+                    ${Object.entries(appData.fixedExpenses).length === 0 ? '<p class="text-xs text-slate-500">Sem contas fixas cadastradas.</p>' : ''}
+                    ${Object.entries(appData.fixedExpenses).flatMap(([cat, items]) => items.map(item => {
+                        const id = `${cat}:${item.name}`;
+                        const isPaid = paidItems.includes(id);
+                        return `
+                        <div class="flex items-center justify-between p-2 rounded-lg ${isPaid ? 'bg-emerald-900/20 border border-emerald-500/30' : 'bg-slate-700/30 border border-slate-700'} transition-all cursor-pointer" onclick="toggleFixedExpensePayment('${appData.selectedWeek}', '${cat}', '${item.name}')">
+                             <div class="flex items-center gap-3">
+                                 <div class="w-5 h-5 rounded border flex items-center justify-center ${isPaid ? 'bg-emerald-500 border-emerald-500' : 'border-slate-500 bg-slate-800'}">
+                                     ${isPaid ? '<svg class="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>' : ''}
+                                 </div>
+                                 <span class="text-sm ${isPaid ? 'text-emerald-100 line-through opacity-70' : 'text-slate-200'}">${item.name}</span>
+                             </div>
+                             <span class="text-sm font-bold ${isPaid ? 'text-emerald-400' : 'text-slate-300'}">${formatMoney(item.value)}</span>
+                        </div>
+                        `
+                    })).join('')}
+                 </div>
+                 <div class="mt-4 pt-3 border-t border-slate-700 flex justify-between text-sm">
+                    <span class="text-slate-400">Falta Pagar:</span>
+                    <span class="font-bold text-rose-400">${formatMoney(pendingFixedExpenses)}</span>
+                 </div>
+             `}
         </div>
       </div>
 
@@ -968,18 +1107,29 @@
         <div class="bg-slate-800 border border-slate-600 rounded-xl p-6 mb-8 animate-fade-in">
           <h3 class="text-lg font-bold mb-4">Ajustar Gastos Fixos - ${getWeekLabel(appData.selectedWeek)}</h3>
           <p class="text-sm text-slate-400 mb-4">
-            Use isso se nesta semana específica seus gastos fixos forem diferentes do padrão (ex: aluguel mais caro, conta extra).
+            Defina um valor total fixo para esta semana caso os cálculos automáticos não se apliquem. (Isso oculta a lista de verificação).
           </p>
-          <div class="flex gap-3">
-            <input
-              type="number"
-              step="0.01"
-              id="weeklyFixedTotal"
-              value="${hasWeeklyAdjustment ? appData.weeklyFixedExpenses[appData.selectedWeek].total : totalFixedExpenses}"
-              class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 focus:border-blue-500 outline-none"
-            />
-            <button onclick="saveWeeklyAdjustment()" class="bg-green-600 hover:bg-green-700 rounded-lg px-6 py-2">Salvar</button>
-            ${hasWeeklyAdjustment ? '<button onclick="removeWeeklyAdjustment()" class="bg-red-600 hover:bg-red-700 rounded-lg px-6 py-2">Restaurar Padrão</button>' : ''}
+          <div class="space-y-3">
+            <div class="flex gap-3">
+                <input
+                type="number"
+                step="0.01"
+                id="weeklyFixedTotal"
+                placeholder="Valor Total"
+                value="${hasWeeklyAdjustment ? appData.weeklyFixedExpenses[appData.selectedWeek].total : totalFixedExpenses}"
+                class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 focus:border-blue-500 outline-none"
+                />
+            </div>
+            <textarea
+                id="weeklyFixedNote"
+                placeholder="Bloco de notas (ex: paguei o aluguel adiantado, usei dinheiro do carro...)"
+                class="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-sm focus:border-blue-500 outline-none min-h-[80px]"
+            >${weeklyAdjustmentNote}</textarea>
+            
+            <div class="flex gap-3">
+                <button onclick="saveWeeklyAdjustment()" class="flex-1 bg-green-600 hover:bg-green-700 rounded-lg px-6 py-2">Salvar Ajuste</button>
+                ${hasWeeklyAdjustment ? '<button onclick="removeWeeklyAdjustment()" class="bg-red-600 hover:bg-red-700 rounded-lg px-6 py-2">Restaurar Padrão</button>' : ''}
+            </div>
           </div>
         </div>
       ` : ''}
@@ -1006,8 +1156,10 @@
               .map(earning => {
                 const platform = getPlatform(earning.platformId);
                 const net = calculateNetEarning(earning.amount, earning.platformId);
+                const isReceived = earning.received !== false; // Default true
+                
                 return appData.editingEarning === earning.id ? renderEarningForm(earning) : `
-                <div class="bg-slate-700/30 hover:bg-slate-700/50 rounded-xl p-4 border border-slate-700 transition-all">
+                <div class="bg-slate-700/30 hover:bg-slate-700/50 rounded-xl p-4 border ${isReceived ? 'border-slate-700' : 'border-yellow-500/50 bg-yellow-500/5'} transition-all">
                   <div class="flex justify-between items-start">
                     <div>
                       <div class="flex items-center gap-2">
@@ -1015,10 +1167,13 @@
                         ${platform.type !== 'none' ? `<span class="text-[10px] px-1.5 py-0.5 bg-slate-600 rounded text-slate-300">${platform.type === 'percent' ? '-' + platform.value + '%' : '-' + formatMoney(platform.value)}</span>` : ''}
                       </div>
                       <p class="text-sm text-slate-400">${new Date(earning.date).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</p>
+                      <button onclick="toggleEarningReceived(${earning.id})" class="mt-2 text-xs border px-2 py-0.5 rounded flex items-center gap-1 ${isReceived ? 'border-emerald-500 text-emerald-400 bg-emerald-500/10' : 'border-yellow-500 text-yellow-400 bg-yellow-500/10'}">
+                         ${isReceived ? '✓ Recebido' : '⏳ Pendente'}
+                      </button>
                     </div>
                     <div class="flex flex-col items-end">
                       <div class="flex items-center gap-3 mb-1">
-                        <p class="text-lg font-bold text-emerald-400">${formatMoney(earning.amount)}</p>
+                        <p class="text-lg font-bold ${isReceived ? 'text-emerald-400' : 'text-yellow-400'}">${formatMoney(earning.amount)}</p>
                          <div class="flex gap-1">
                           <button onclick="appData.editingEarning=${earning.id}; renderApp();" class="text-slate-400 hover:text-white p-1">✏️</button>
                           <button onclick="deleteEarning(${earning.id});" class="text-slate-400 hover:text-rose-400 p-1">🗑️</button>
@@ -1350,6 +1505,7 @@
 
     const date = earning?.date || new Date().toISOString().split('T')[0];
     const amount = earning?.amount || '';
+    const received = earning ? earning.received : true;
 
     return `
       <div class="bg-slate-700 rounded-xl p-4 mb-4 border-l-4 border-emerald-500 animate-fade-in">
@@ -1371,14 +1527,20 @@
             <input type="number" step="0.01" id="amount" value="${amount}" placeholder="0.00" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500" />
           </div>
         </div>
+        
+        <div class="flex items-center gap-2 mb-4">
+             <input type="checkbox" id="received" ${received ? 'checked' : ''} class="w-4 h-4 rounded border-slate-500 text-emerald-500 focus:ring-emerald-500 bg-slate-600">
+             <label for="received" class="text-sm text-slate-300">Dinheiro já recebido (caiu na conta)</label>
+        </div>
 
         <div class="flex gap-2">
           <button onclick="
             const platformId = document.getElementById('platformId').value;
             const date = document.getElementById('date').value;
             const amount = parseFloat(document.getElementById('amount').value);
+            const received = document.getElementById('received').checked;
             if (platformId && date && amount) {
-              ${earning ? `updateEarning(${earning.id}, {platformId, date, amount})` : 'addEarning({platformId, date, amount})'};
+              ${earning ? `updateEarning(${earning.id}, {platformId, date, amount, received})` : 'addEarning({platformId, date, amount, received})'};
             } else {
                 showToast('Preencha todos os campos!', 'error');
             }
