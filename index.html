@@ -26,6 +26,48 @@
 
     let currentUser = null;
 
+    // ============= HELPERS FOR APPDATA INITIALIZATION =============
+    function toLocalISO(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function getCurrentWeek() {
+      const now = new Date();
+      const start = new Date(now);
+      const day = start.getDay() || 7; // Domingo vira 7
+      start.setDate(now.getDate() - day + 1); // Volta para Segunda-feira
+      start.setHours(0, 0, 0, 0);
+      return toLocalISO(start);
+    }
+
+    // ============= APP STATE =============
+    window.appData = {
+      activeTab: 'dashboard',
+      currency: 'GBP',
+      isNewUser: false,
+      showSettings: false,
+      earnings: [],
+      expenses: [],
+      fixedExpenses: {},
+      weeklyFixedExpenses: {},
+      platforms: [], 
+      selectedWeek: getCurrentWeek(),
+      selectedYear: new Date().getFullYear(),
+      selectedMonth: new Date().getMonth() + 1,
+      weekGoal: 500,
+      showAddEarning: false,
+      showAddExpense: false,
+      showFixedExpensesEditor: false,
+      showWeeklyAdjustment: false,
+      showPlatformManager: false,
+      editingEarning: null,
+      editingExpense: null,
+      editingPlatformId: null
+    };
+
     // ============= UTILS: CURRENCY & LOCALE =============
     const CURRENCY_MAP = {
       'GBP': { locale: 'en-GB', currency: 'GBP', symbol: '£' },
@@ -91,7 +133,7 @@
       window.confirmCallback = null;
     };
 
-    // ============= MODAL INPUT SYSTEM (Replaces Prompt) =============
+    // ============= MODAL INPUT SYSTEM =============
     window.inputCallback = null;
     window.showInputModal = (title, initialValue, onConfirm) => {
         const modal = document.getElementById('inputModal');
@@ -114,21 +156,242 @@
         window.inputCallback = null;
     };
 
-    // ============= AUTH =============
-    onAuthStateChanged(auth, (user) => {
-      if (user) {
-        currentUser = user;
-        document.getElementById('authScreen').classList.add('hidden');
-        document.getElementById('appScreen').classList.remove('hidden');
-        document.getElementById('userEmail').textContent = user.email;
-        loadAllData();
-      } else {
-        currentUser = null;
-        document.getElementById('authScreen').classList.remove('hidden');
-        document.getElementById('appScreen').classList.add('hidden');
-      }
-    });
+    // ============= CHART DETAILS MODAL =============
+    window.dayDetails = null; 
+    window.openDayDetails = (dayIndex, type) => {
+        const modal = document.getElementById('dayDetailsModal');
+        const listContainer = document.getElementById('dayDetailsList');
+        const title = document.getElementById('dayDetailsTitle');
+        const days = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'];
+        
+        let relevantEarnings = [];
+        let total = 0;
 
+        if (type === 'week') {
+            relevantEarnings = appData.earnings.filter(e => {
+                const eWeek = getWeekFromDate(e.date);
+                if (eWeek !== appData.selectedWeek) return false;
+                
+                let jsDay = new Date(e.date).getDay();
+                let chartDay = jsDay === 0 ? 6 : jsDay - 1;
+                return chartDay === dayIndex;
+            });
+            title.textContent = `Detalhes de ${days[dayIndex]} (Semana)`;
+        } else if (type === 'month') {
+            const monthKey = `${appData.selectedYear}-${String(appData.selectedMonth).padStart(2, '0')}`;
+            relevantEarnings = appData.earnings.filter(e => {
+                const parts = e.date.split('-');
+                const eMonth = `${parts[0]}-${parts[1]}`;
+                if (eMonth !== monthKey) return false;
+
+                let jsDay = new Date(e.date).getDay();
+                let chartDay = jsDay === 0 ? 6 : jsDay - 1;
+                return chartDay === dayIndex;
+            });
+            title.textContent = `Resumo de todas as ${days[dayIndex]}s`;
+        }
+
+        total = relevantEarnings.reduce((sum, e) => sum + e.amount, 0);
+
+        if (relevantEarnings.length === 0) {
+            listContainer.innerHTML = '<p class="text-slate-500 text-center py-4">Sem registros neste dia.</p>';
+        } else {
+            listContainer.innerHTML = `
+                <div class="mb-4 text-center">
+                    <p class="text-xs text-slate-400 uppercase">Total do Dia</p>
+                    <p class="text-2xl font-bold text-emerald-400">${formatMoney(total)}</p>
+                </div>
+                <div class="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-1">
+                    ${relevantEarnings.sort((a,b) => b.amount - a.amount).map(e => {
+                         const platform = getPlatform(e.platformId);
+                         return `
+                            <div class="bg-slate-700/50 p-3 rounded-lg flex justify-between items-center border border-slate-600">
+                                <div>
+                                    <p class="font-bold text-white text-sm">${platform.name}</p>
+                                    <p class="text-xs text-slate-400">${new Date(e.date).toLocaleDateString('pt-BR')}</p>
+                                </div>
+                                <span class="font-bold text-emerald-400">${formatMoney(e.amount)}</span>
+                            </div>
+                         `;
+                    }).join('')}
+                </div>
+            `;
+        }
+
+        modal.classList.remove('hidden');
+    };
+
+    window.closeDayDetails = () => {
+        document.getElementById('dayDetailsModal').classList.add('hidden');
+    };
+
+    // ============= MARKDOWN & NOTES SYSTEM =============
+    window.insertFormatting = (format) => {
+        const textarea = document.getElementById('weeklyFixedNote');
+        if (!textarea) return;
+
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const text = textarea.value;
+        const before = text.substring(0, start);
+        const selection = text.substring(start, end);
+        const after = text.substring(end);
+
+        let newText = '';
+        let newCursorPos = 0;
+
+        if (format === 'bold') {
+            newText = `${before}**${selection}**${after}`;
+            newCursorPos = selection ? end + 4 : start + 2;
+        } else if (format === 'italic') {
+            newText = `${before}*${selection}*${after}`;
+            newCursorPos = selection ? end + 2 : start + 1;
+        } else if (format === 'underline') {
+            newText = `${before}__${selection}__${after}`;
+            newCursorPos = selection ? end + 4 : start + 2;
+        }
+
+        textarea.value = newText;
+        textarea.focus();
+        textarea.setSelectionRange(newCursorPos, newCursorPos);
+    };
+
+    window.parseNoteMarkdown = (text) => {
+        if (!text) return '';
+        let sanitized = text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+
+        return sanitized
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') 
+            .replace(/\*(.*?)\*/g, '<em>$1</em>') 
+            .replace(/__(.*?)__/g, '<u>$1</u>') 
+            .replace(/\n/g, '<br>'); 
+    };
+
+    // ============= OTHER HELPERS =============
+    function getWeekEnd(weekStart) {
+        const parts = weekStart.split('-');
+        const start = new Date(parts[0], parts[1] - 1, parts[2]);
+        const end = new Date(start);
+        end.setDate(start.getDate() + 6);
+        return toLocalISO(end);
+    }
+
+    function getWeekFromDate(dateStr) {
+        const parts = dateStr.split('-');
+        const date = new Date(parts[0], parts[1] - 1, parts[2]);
+        const start = new Date(date);
+        const day = start.getDay() || 7; 
+        start.setDate(date.getDate() - day + 1);
+        start.setHours(0, 0, 0, 0);
+        return toLocalISO(start);
+    }
+
+    function getTotalFixedExpenses(weekStart) {
+        if (appData.weeklyFixedExpenses[weekStart] && appData.weeklyFixedExpenses[weekStart].total !== undefined) {
+        return appData.weeklyFixedExpenses[weekStart].total;
+        }
+
+        const overrides = appData.weeklyFixedExpenses[weekStart]?.itemOverrides || {};
+        let total = 0;
+        
+        Object.entries(appData.fixedExpenses).forEach(([cat, items]) => {
+            items.forEach(item => {
+                const key = `${cat}:${item.name}`;
+                if (overrides[key] !== undefined) {
+                    total += overrides[key];
+                } else {
+                    total += item.value;
+                }
+            });
+        });
+        
+        return total;
+    }
+
+    function getPaidFixedExpensesAmount(weekStart) {
+        const weekData = appData.weeklyFixedExpenses[weekStart];
+        if (!weekData || !weekData.paidItems) return 0;
+
+        const overrides = weekData.itemOverrides || {};
+        let totalPaid = 0;
+        
+        Object.entries(appData.fixedExpenses).forEach(([cat, items]) => {
+            items.forEach(item => {
+                const id = `${cat}:${item.name}`;
+                if (weekData.paidItems.includes(id)) {
+                    if (overrides[id] !== undefined) {
+                        totalPaid += overrides[id];
+                    } else {
+                        totalPaid += item.value;
+                    }
+                }
+            });
+        });
+        return totalPaid;
+    }
+
+    function getPlatform(id) {
+        return appData.platforms.find(p => p.id === id) || appData.platforms[0] || { name: 'Desconhecido', type: 'none', value: 0 };
+    }
+
+    function calculateNetEarning(amount, platformId) {
+        const p = getPlatform(platformId);
+        let net = amount;
+        if (p.type === 'percent') {
+            net = amount * (1 - p.value / 100);
+        } else if (p.type === 'fixed') {
+            net = amount - p.value;
+        }
+        return net;
+    }
+
+    function getWeekLabel(weekStart) {
+        const currentWeek = getCurrentWeek();
+        const weekDate = new Date(weekStart);
+        const currentDate = new Date(currentWeek);
+        
+        if (weekStart === currentWeek) return 'Semana Atual';
+        const weeksDiff = Math.round((currentDate - weekDate) / (7 * 24 * 60 * 60 * 1000));
+        if (weeksDiff === 1) return 'Semana Passada';
+        if (weeksDiff === 0) return 'Esta Semana';
+        if (weeksDiff < 0) return 'Próxima Semana';
+        return `Há ${weeksDiff} semanas`;
+    }
+
+    function getWeeksList() {
+        const weeks = new Set();
+        appData.earnings.forEach(e => weeks.add(getWeekFromDate(e.date)));
+        appData.expenses.forEach(e => weeks.add(e.week));
+        weeks.add(getCurrentWeek());
+        return Array.from(weeks).sort().reverse();
+    }
+
+    function calculateWeekEarnings(weekStart) {
+        return appData.earnings
+        .filter(e => getWeekFromDate(e.date) === weekStart)
+        .reduce((sum, e) => {
+            return sum + calculateNetEarning(e.amount, e.platformId);
+        }, 0);
+    }
+    
+    function calculateWeekReceivedEarnings(weekStart) {
+        return appData.earnings
+        .filter(e => getWeekFromDate(e.date) === weekStart && e.received)
+        .reduce((sum, e) => {
+            return sum + calculateNetEarning(e.amount, e.platformId);
+        }, 0);
+    }
+
+    function calculateWeekExpenses(weekStart) {
+        return appData.expenses
+        .filter(e => e.week === weekStart)
+        .reduce((sum, e) => sum + e.amount, 0);
+    }
+
+    // ============= ACTIONS & AUTH HANDLERS =============
     window.handleLogin = async () => {
       const email = document.getElementById('loginEmail').value;
       const password = document.getElementById('loginPassword').value;
@@ -168,18 +431,6 @@
       window.location.reload();
     };
 
-    // ============= DATA SYNC =============
-    async function saveToFirebase(collection_name, id, data) {
-      if (!currentUser) return;
-      await setDoc(doc(db, `users/${currentUser.uid}/${collection_name}`, id), data);
-    }
-
-    async function deleteFromFirebase(collection_name, id) {
-      if (!currentUser) return;
-      await deleteDoc(doc(db, `users/${currentUser.uid}/${collection_name}`, id));
-    }
-
-    // ============= CLEAR ALL DATA =============
     window.clearAllData = async () => {
       window.showConfirm('TEM CERTEZA? Isso apagará TODOS os seus dados (ganhos, gastos, configurações) permanentemente. A página será recarregada.', async () => {
         if (!currentUser) return;
@@ -223,73 +474,6 @@
       });
     };
 
-    async function loadAllData() {
-      if (!currentUser) return;
-      
-      const earningsSnap = await getDocs(collection(db, `users/${currentUser.uid}/earnings`));
-      const expensesSnap = await getDocs(collection(db, `users/${currentUser.uid}/expenses`));
-      const fixedSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'fixedExpenses'));
-      const weeklyFixedSnap = await getDocs(collection(db, `users/${currentUser.uid}/weeklyFixedExpenses`));
-      const goalSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'weekGoal'));
-      const prefSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'preferences'));
-
-      window.appData.earnings = [];
-      earningsSnap.forEach(doc => {
-          const data = doc.data();
-          // Backward compatibility: default received to true if not exists
-          const received = data.received !== undefined ? data.received : true; 
-          window.appData.earnings.push({ id: doc.id, ...data, received });
-      });
-      
-      window.appData.expenses = [];
-      expensesSnap.forEach(doc => window.appData.expenses.push({ id: doc.id, ...doc.data() }));
-      
-      // Defaults
-      const DEFAULT_PLATFORMS = [{ id: 'geral', name: 'Geral', type: 'none', value: 0 }];
-
-      if (prefSnap.exists()) {
-        const data = prefSnap.data();
-        window.appData.currency = data.currency || detectCurrency();
-        window.appData.platforms = data.platforms || DEFAULT_PLATFORMS;
-        
-        // Verifica se o tutorial já foi completado
-        if (data.tutorialComplete === false) {
-             window.appData.isNewUser = true;
-        } else if (data.tutorialComplete === undefined && !fixedSnap.exists()) {
-             // Fallback para usuários antigos ou migração
-             window.appData.isNewUser = true;
-        }
-      } else {
-        window.appData.currency = detectCurrency();
-        window.appData.platforms = DEFAULT_PLATFORMS;
-        window.appData.isNewUser = true;
-      }
-
-      if (fixedSnap.exists()) {
-        window.appData.fixedExpenses = fixedSnap.data();
-      } else {
-        window.appData.fixedExpenses = { 'Geral': [] };
-      }
-
-      window.appData.weeklyFixedExpenses = {};
-      weeklyFixedSnap.forEach(doc => {
-        window.appData.weeklyFixedExpenses[doc.id] = doc.data();
-        // Garantir que paidItems e itemOverrides existem
-        if (!window.appData.weeklyFixedExpenses[doc.id].paidItems) {
-            window.appData.weeklyFixedExpenses[doc.id].paidItems = [];
-        }
-        if (!window.appData.weeklyFixedExpenses[doc.id].itemOverrides) {
-            window.appData.weeklyFixedExpenses[doc.id].itemOverrides = {};
-        }
-      });
-
-      if (goalSnap.exists()) {
-        window.appData.weekGoal = goalSnap.data().value;
-      }
-
-      window.renderApp();
-    }
-
     window.syncEarning = async (earning) => {
       await saveToFirebase('earnings', earning.id.toString(), earning);
     };
@@ -325,53 +509,1198 @@
     window.deleteExpenseFromFirebase = async (id) => {
       await deleteFromFirebase('expenses', id.toString());
     };
+    
+    async function saveToFirebase(collection_name, id, data) {
+      if (!currentUser) return;
+      await setDoc(doc(db, `users/${currentUser.uid}/${collection_name}`, id), data);
+    }
 
-    // ============= MARKDOWN & NOTES SYSTEM =============
-    window.insertFormatting = (format) => {
-        const textarea = document.getElementById('weeklyFixedNote');
-        if (!textarea) return;
+    async function deleteFromFirebase(collection_name, id) {
+      if (!currentUser) return;
+      await deleteDoc(doc(db, `users/${currentUser.uid}/${collection_name}`, id));
+    }
 
-        const start = textarea.selectionStart;
-        const end = textarea.selectionEnd;
-        const text = textarea.value;
-        const before = text.substring(0, start);
-        const selection = text.substring(start, end);
-        const after = text.substring(end);
+    window.changeCurrency = async (newCurrency) => {
+        appData.currency = newCurrency;
+        appData.showSettings = false;
+        await window.syncPreferences();
+        renderApp();
+        showToast('Moeda alterada com sucesso!', 'success');
+    };
 
-        let newText = '';
-        let newCursorPos = 0;
+    window.savePlatform = async (id, name, type, value) => {
+        if(!name) return showToast('Nome é obrigatório', 'error');
+        const newVal = parseFloat(value) || 0;
+        
+        if (id) {
+            const idx = appData.platforms.findIndex(p => p.id === id);
+            if(idx >= 0) {
+                appData.platforms[idx] = { ...appData.platforms[idx], name, type, value: newVal };
+            }
+        } else {
+            appData.platforms.push({ id: Date.now().toString(), name, type, value: newVal });
+        }
+        
+        appData.editingPlatformId = null; 
+        await window.syncPreferences();
+        renderApp();
+        showToast(id ? 'Fonte atualizada!' : 'Fonte adicionada!', 'success');
+    };
+    
+    window.startEditingPlatform = (id) => {
+        appData.editingPlatformId = id;
+        renderApp();
+    };
 
-        if (format === 'bold') {
-            newText = `${before}**${selection}**${after}`;
-            newCursorPos = selection ? end + 4 : start + 2;
-        } else if (format === 'italic') {
-            newText = `${before}*${selection}*${after}`;
-            newCursorPos = selection ? end + 2 : start + 1;
-        } else if (format === 'underline') {
-            newText = `${before}__${selection}__${after}`;
-            newCursorPos = selection ? end + 4 : start + 2;
+    window.deletePlatform = async (id) => {
+        window.showConfirm('Deletar esta fonte? Os ganhos antigos usarão a regra padrão.', async () => {
+            appData.platforms = appData.platforms.filter(p => p.id !== id);
+            if(appData.editingPlatformId === id) appData.editingPlatformId = null;
+            await window.syncPreferences();
+            renderApp();
+            showToast('Fonte removida', 'info');
+        });
+    };
+
+    window.checkAndAutoUpdateGoal = async () => {
+        const weekStart = appData.selectedWeek;
+        const varExpenses = calculateWeekExpenses(weekStart);
+        const fixExpenses = getTotalFixedExpenses(weekStart);
+        const total = varExpenses + fixExpenses;
+
+        if (total > appData.weekGoal) {
+            appData.weekGoal = total;
+            await window.syncWeekGoal(total);
+            showToast(`Meta ajustada automaticamente: ${formatMoney(total)}`, 'info');
+        }
+    };
+
+    window.addEarning = async (earning) => {
+        const newEarning = { ...earning, id: Date.now() };
+        appData.earnings.push(newEarning);
+        await window.syncEarning(newEarning);
+        appData.showAddEarning = false;
+        showToast('Entrada adicionada!', 'success');
+        renderApp();
+    };
+
+    window.updateEarning = async (id, updatedEarning) => {
+        const index = appData.earnings.findIndex(e => e.id === id);
+        appData.earnings[index] = { ...updatedEarning, id };
+        await window.syncEarning(appData.earnings[index]);
+        appData.editingEarning = null;
+        showToast('Entrada atualizada!', 'success');
+        renderApp();
+    };
+    
+    window.toggleEarningReceived = async (id) => {
+        const index = appData.earnings.findIndex(e => e.id === id);
+        if(index >= 0) {
+            const newVal = !appData.earnings[index].received;
+            appData.earnings[index].received = newVal;
+            await window.syncEarning(appData.earnings[index]);
+            renderApp();
+        }
+    };
+
+    window.deleteEarning = async (id) => {
+        window.showConfirm('Tem certeza que deseja deletar esta entrada?', async () => {
+            appData.earnings = appData.earnings.filter(e => e.id !== id);
+            await window.deleteEarningFromFirebase(id);
+            renderApp();
+            showToast('Entrada removida.', 'info');
+        });
+    };
+
+    window.addExpense = async (expense) => {
+        const newExpense = { ...expense, id: Date.now() };
+        appData.expenses.push(newExpense);
+        await window.syncExpense(newExpense);
+        await window.checkAndAutoUpdateGoal();
+        appData.showAddExpense = false;
+        showToast('Gasto variável adicionado!', 'success');
+        renderApp();
+    };
+
+    window.updateExpense = async (id, updatedExpense) => {
+        const index = appData.expenses.findIndex(e => e.id === id);
+        appData.expenses[index] = { ...updatedExpense, id };
+        await window.syncExpense(appData.expenses[index]);
+        await window.checkAndAutoUpdateGoal();
+        appData.editingExpense = null;
+        showToast('Gasto atualizado!', 'success');
+        renderApp();
+    };
+
+    window.deleteExpense = async (id) => {
+        window.showConfirm('Tem certeza que deseja deletar este gasto?', async () => {
+            appData.expenses = appData.expenses.filter(e => e.id !== id);
+            await window.deleteExpenseFromFirebase(id);
+            renderApp();
+            showToast('Gasto removido.', 'info');
+        });
+    };
+
+    window.saveWeeklyAdjustment = async () => {
+        const weekStart = appData.selectedWeek;
+        const newTotal = parseFloat(document.getElementById('weeklyFixedTotal').value) || 0;
+        const note = document.getElementById('weeklyFixedNote').value || '';
+        
+        const currentData = appData.weeklyFixedExpenses[weekStart] || {};
+        const newData = { ...currentData, total: newTotal, note: note };
+        
+        appData.weeklyFixedExpenses[weekStart] = newData;
+        await window.syncWeeklyFixedExpense(weekStart, newData);
+        await window.checkAndAutoUpdateGoal();
+        appData.showWeeklyAdjustment = false;
+        showToast('Ajuste semanal salvo!', 'success');
+        renderApp();
+    };
+
+    window.removeWeeklyAdjustment = async () => {
+        const weekStart = appData.selectedWeek;
+        if (appData.weeklyFixedExpenses[weekStart]) {
+            delete appData.weeklyFixedExpenses[weekStart].total;
+            delete appData.weeklyFixedExpenses[weekStart].note;
+            await window.syncWeeklyFixedExpense(weekStart, appData.weeklyFixedExpenses[weekStart]);
+        }
+        await window.checkAndAutoUpdateGoal();
+        appData.showWeeklyAdjustment = false;
+        showToast('Ajuste removido, usando valor padrão.', 'info');
+        renderApp();
+    };
+    
+    window.toggleFixedExpensePayment = async (week, category, name) => {
+        const id = `${category}:${name}`;
+        if (!appData.weeklyFixedExpenses[week]) {
+            appData.weeklyFixedExpenses[week] = { paidItems: [], itemOverrides: {} };
+        }
+        
+        const list = appData.weeklyFixedExpenses[week].paidItems || [];
+        if (list.includes(id)) {
+            appData.weeklyFixedExpenses[week].paidItems = list.filter(i => i !== id);
+        } else {
+            appData.weeklyFixedExpenses[week].paidItems = [...list, id];
+        }
+        
+        await window.syncWeeklyFixedExpense(week, appData.weeklyFixedExpenses[week]);
+        renderApp();
+    };
+    
+    window.promptFixedExpenseOverride = (week, category, name, currentValue) => {
+        const title = `Valor para ${name} (Esta semana)`;
+        window.showInputModal(title, currentValue, async (val) => {
+            if (!val) return;
+            const newValue = parseFloat(val);
+            const id = `${category}:${name}`;
+            
+            if (!appData.weeklyFixedExpenses[week]) {
+                appData.weeklyFixedExpenses[week] = { paidItems: [], itemOverrides: {} };
+            }
+            if (!appData.weeklyFixedExpenses[week].itemOverrides) {
+                appData.weeklyFixedExpenses[week].itemOverrides = {};
+            }
+            
+            appData.weeklyFixedExpenses[week].itemOverrides[id] = newValue;
+            await window.syncWeeklyFixedExpense(week, appData.weeklyFixedExpenses[week]);
+            await window.checkAndAutoUpdateGoal();
+            renderApp();
+            showToast(`Valor de ${name} alterado para esta semana.`, 'success');
+        });
+    };
+    
+    window.resetFixedExpenseOverride = async (week, category, name) => {
+        const id = `${category}:${name}`;
+        if (appData.weeklyFixedExpenses[week] && appData.weeklyFixedExpenses[week].itemOverrides) {
+            delete appData.weeklyFixedExpenses[week].itemOverrides[id];
+            await window.syncWeeklyFixedExpense(week, appData.weeklyFixedExpenses[week]);
+            await window.checkAndAutoUpdateGoal();
+            renderApp();
+            showToast(`Valor restaurado para o padrão.`, 'info');
+        }
+    };
+
+    window.updateFixedExpenses = async (newFixed) => {
+        appData.fixedExpenses = newFixed;
+        await window.syncFixedExpenses(newFixed);
+        await window.checkAndAutoUpdateGoal();
+        showToast('Gastos fixos atualizados!', 'success');
+        renderApp();
+    };
+
+    window.saveWeekGoal = async (goal) => {
+        appData.weekGoal = goal;
+        await window.syncWeekGoal(goal);
+        renderApp();
+        showToast('Nova meta definida!', 'success');
+    };
+
+    window.promptWeekGoal = () => {
+        window.showInputModal('Nova Meta Semanal', appData.weekGoal, (val) => {
+            if(val) saveWeekGoal(parseFloat(val));
+        });
+    };
+
+    window.finishOnboarding = async (currency) => {
+        appData.currency = currency;
+        appData.isNewUser = false;
+        await window.syncPreferences(true); 
+        renderApp();
+        showToast(`Moeda definida: ${currency}. Bem-vindo!`, 'success');
+    };
+
+    // ============= RENDER SYSTEM =============
+
+    function renderDayChart(data, periodType) {
+        const days = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+        const maxVal = Math.max(...data, 1); 
+
+        return `
+        <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-6 mb-8">
+            <div class="flex justify-between items-center mb-6">
+                <h3 class="text-sm font-bold text-slate-300 uppercase tracking-wider">
+                    ${periodType === 'week' ? 'Performance Diária' : 'Performance por Dia da Semana (Mês)'}
+                </h3>
+            </div>
+            <div class="flex items-end justify-between h-48 gap-2 md:gap-4">
+                ${data.map((val, idx) => {
+                    const percent = (val / maxVal) * 100;
+                    return `
+                    <div class="flex flex-col items-center flex-1 h-full group cursor-pointer" onclick="openDayDetails(${idx}, '${periodType}')">
+                        <div class="relative w-full flex-1 flex items-end bg-slate-700/30 rounded-t-sm overflow-hidden hover:bg-slate-700/50 transition-colors">
+                            <div class="w-full bg-blue-600 hover:bg-blue-500 transition-all duration-500 ease-out relative" style="height: ${percent}%;"></div>
+                        </div>
+                        <span class="mt-3 text-xs text-slate-400 font-bold group-hover:text-white transition-colors">${days[idx]}</span>
+                    </div>
+                    `;
+                }).join('')}
+            </div>
+        </div>
+        `;
+    }
+
+    function renderEarningForm(earning = null) {
+        let platformId = earning?.platformId;
+        if (!platformId && earning?.platform) {
+            const found = appData.platforms.find(p => p.name.toLowerCase() === earning.platform.toLowerCase());
+            platformId = found ? found.id : appData.platforms[0]?.id;
+        }
+        if (!platformId && !earning) platformId = appData.platforms[0]?.id;
+
+        const date = earning?.date || new Date().toISOString().split('T')[0];
+        const amount = earning?.amount || '';
+        const received = earning ? earning.received : true;
+
+        return `
+        <div class="bg-slate-700 rounded-xl p-4 mb-4 border-l-4 border-emerald-500 animate-fade-in">
+            <label class="block text-xs text-slate-400 mb-1">Fonte de Renda</label>
+            <div class="flex gap-2 mb-3">
+                <select id="platformId" class="flex-1 bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500">
+                ${appData.platforms.map(p => `<option value="${p.id}" ${platformId === p.id ? 'selected' : ''}>${p.name}</option>`).join('')}
+                </select>
+                <button onclick="appData.showPlatformManager = true; renderApp();" class="bg-slate-600 hover:bg-slate-500 px-3 rounded border border-slate-500 text-sm" title="Gerenciar Fontes">Gerenciar</button>
+            </div>
+            
+            <div class="grid grid-cols-2 gap-3 mb-3">
+            <div>
+                <label class="block text-xs text-slate-400 mb-1">Data</label>
+                <input type="date" id="date" value="${date}" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500" />
+            </div>
+            <div>
+                <label class="block text-xs text-slate-400 mb-1">Valor Bruto</label>
+                <input type="number" step="0.01" id="amount" value="${amount}" placeholder="0.00" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500" />
+            </div>
+            </div>
+            
+            <div class="flex items-center gap-2 mb-4">
+                <input type="checkbox" id="received" ${received ? 'checked' : ''} class="w-4 h-4 rounded border-slate-500 text-emerald-500 focus:ring-emerald-500 bg-slate-600">
+                <label for="received" class="text-sm text-slate-300">Dinheiro já recebido (caiu na conta)</label>
+            </div>
+
+            <div class="flex gap-2">
+            <button onclick="
+                const platformId = document.getElementById('platformId').value;
+                const date = document.getElementById('date').value;
+                const amount = parseFloat(document.getElementById('amount').value);
+                const received = document.getElementById('received').checked;
+                if (platformId && date && amount) {
+                ${earning ? `updateEarning(${earning.id}, {platformId, date, amount, received})` : 'addEarning({platformId, date, amount, received})'};
+                } else {
+                    showToast('Preencha todos os campos!', 'error');
+                }
+            " class="flex-1 bg-emerald-600 hover:bg-emerald-700 rounded-lg px-4 py-2 font-bold transition-colors">Salvar</button>
+            <button onclick="appData.${earning ? 'editingEarning' : 'showAddEarning'}=null; renderApp();" class="flex-1 bg-slate-600 hover:bg-slate-500 rounded-lg px-4 py-2 transition-colors">Cancelar</button>
+            </div>
+        </div>
+        `;
+    }
+
+    function renderExpenseForm(expense = null) {
+        const description = expense?.description || '';
+        const date = expense?.date || new Date().toISOString().split('T')[0];
+        const amount = expense?.amount || '';
+
+        return `
+        <div class="bg-slate-700 rounded-xl p-4 mb-4 border-l-4 border-rose-500 animate-fade-in">
+            <label class="block text-xs text-slate-400 mb-1">Descrição</label>
+            <input type="text" id="description" value="${description}" placeholder="Ex: Gasolina, Almoço..." class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 mb-3 text-white outline-none focus:border-rose-500" />
+            
+            <div class="grid grid-cols-2 gap-3 mb-3">
+            <div>
+                <label class="block text-xs text-slate-400 mb-1">Data</label>
+                <input type="date" id="date" value="${date}" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-rose-500" />
+            </div>
+            <div>
+                <label class="block text-xs text-slate-400 mb-1">Valor</label>
+                <input type="number" step="0.01" id="amount" value="${amount}" placeholder="0.00" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-rose-500" />
+            </div>
+            </div>
+
+            <div class="flex gap-2">
+            <button onclick="
+                const description = document.getElementById('description').value;
+                const date = document.getElementById('date').value;
+                const amount = parseFloat(document.getElementById('amount').value);
+                if (description && date && amount) {
+                ${expense ? `updateExpense(${expense.id}, {description, date, amount, week: appData.selectedWeek})` : 'addExpense({description, date, amount, week: appData.selectedWeek})'};
+                } else {
+                    showToast('Preencha todos os campos!', 'error');
+                }
+            " class="flex-1 bg-rose-600 hover:bg-rose-700 rounded-lg px-4 py-2 font-bold transition-colors">Salvar</button>
+            <button onclick="appData.${expense ? 'editingExpense' : 'showAddExpense'}=null; renderApp();" class="flex-1 bg-slate-600 hover:bg-slate-500 rounded-lg px-4 py-2 transition-colors">Cancelar</button>
+            </div>
+        </div>
+        `;
+    }
+
+    function renderFixedExpensesEditor() {
+        return `
+        <div class="space-y-6 animate-fade-in">
+            <div class="flex flex-col md:flex-row gap-2 mb-6 bg-slate-700/30 p-4 rounded-xl border border-slate-600">
+                <div class="flex-1">
+                    <label class="block text-xs text-slate-400 mb-1">Nova Categoria</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="newCategoryInput" placeholder="Ex: Casa, Carro" class="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 outline-none">
+                        <button onclick="const name = document.getElementById('newCategoryInput').value; if(name) { appData.fixedExpenses[name] = []; renderApp(); showToast('Categoria criada!', 'success'); }" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg font-bold">Criar</button>
+                    </div>
+                </div>
+                <div class="text-xs text-slate-400 md:w-1/3 flex items-center">
+                    Crie categorias para agrupar seus gastos fixos (ex: Casa pode conter Aluguel, Luz, Internet).
+                </div>
+            </div>
+
+            ${Object.entries(appData.fixedExpenses).map(([bank, items]) => `
+            <div class="bg-slate-700/50 rounded-xl p-4 border border-slate-600">
+                <div class="flex items-center justify-between mb-4">
+                <h3 class="font-bold capitalize text-blue-400 text-lg">${bank}</h3>
+                <div class="flex gap-2">
+                    <button onclick="appData.fixedExpenses['${bank}'].push({name: 'Novo item', value: 0}); renderApp();" class="text-green-400 hover:text-green-300 text-sm px-2 py-1 bg-green-400/10 rounded">+ Item</button>
+                    <button onclick="window.showConfirm('Remover categoria ${bank}?', () => { delete appData.fixedExpenses['${bank}']; renderApp(); showToast('Categoria removida', 'info'); })" class="text-rose-400 hover:text-rose-300 text-sm px-2 py-1 bg-rose-400/10 rounded">Excluir Categoria</button>
+                </div>
+                </div>
+                <div class="space-y-3" id="${bank}-items">
+                ${items.map((item, idx) => `
+                    <div class="flex gap-2 items-center">
+                    <input
+                        type="text"
+                        value="${item.name}"
+                        onchange="appData.fixedExpenses['${bank}'][${idx}].name = this.value"
+                        class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-blue-500 outline-none"
+                        placeholder="Nome"
+                    />
+                    <input
+                        type="number"
+                        step="0.01"
+                        value="${item.value}"
+                        onchange="appData.fixedExpenses['${bank}'][${idx}].value = parseFloat(this.value) || 0"
+                        class="w-24 md:w-32 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-blue-500 outline-none"
+                        placeholder="Valor"
+                    />
+                    <button onclick="appData.fixedExpenses['${bank}'].splice(${idx}, 1); renderApp();" class="text-rose-400 hover:text-rose-300 p-2 rounded hover:bg-rose-400/10">✕</button>
+                    </div>
+                `).join('')}
+                ${items.length === 0 ? '<p class="text-sm text-slate-500 italic">Nenhum item nesta categoria.</p>' : ''}
+                </div>
+            </div>
+            `).join('')}
+
+            <div class="fixed bottom-6 right-6 md:relative md:bottom-auto md:right-auto flex gap-3 md:justify-end z-40">
+            <button onclick="updateFixedExpenses(appData.fixedExpenses); appData.showFixedExpensesEditor=false; renderApp();" class="bg-green-600 hover:bg-green-700 text-white rounded-xl px-8 py-3 font-bold shadow-xl shadow-green-500/30 transition-transform hover:scale-105">Salvar Alterações</button>
+            </div>
+            <div class="h-20 md:h-0"></div>
+        </div>
+        `;
+    }
+
+    function renderDashboard() {
+        const weekEarnings = calculateWeekEarnings(appData.selectedWeek);
+        const weekReceived = calculateWeekReceivedEarnings(appData.selectedWeek);
+        const weekExpenses = calculateWeekExpenses(appData.selectedWeek);
+        const totalFixedExpenses = getTotalFixedExpenses(appData.selectedWeek);
+        const paidFixedExpenses = getPaidFixedExpensesAmount(appData.selectedWeek);
+        const pendingFixedExpenses = totalFixedExpenses - paidFixedExpenses;
+        
+        const cashOnHand = weekReceived - weekExpenses - paidFixedExpenses;
+        const weekBalance = weekEarnings - weekExpenses - totalFixedExpenses;
+        const progressPercentage = Math.min((weekEarnings / appData.weekGoal) * 100, 100);
+        const hasWeeklyAdjustment = appData.weeklyFixedExpenses[appData.selectedWeek] && appData.weeklyFixedExpenses[appData.selectedWeek].total !== undefined;
+        const weeklyAdjustmentNote = hasWeeklyAdjustment ? (appData.weeklyFixedExpenses[appData.selectedWeek].note || '') : '';
+        
+        const weekFixedData = appData.weeklyFixedExpenses[appData.selectedWeek] || { paidItems: [], itemOverrides: {} };
+        const paidItems = weekFixedData.paidItems || [];
+        const itemOverrides = weekFixedData.itemOverrides || {};
+
+        const weeklyChartData = [0,0,0,0,0,0,0];
+        appData.earnings.filter(e => getWeekFromDate(e.date) === appData.selectedWeek).forEach(e => {
+            let jsDay = new Date(e.date).getDay(); 
+            let chartIdx = jsDay === 0 ? 6 : jsDay - 1; 
+            weeklyChartData[chartIdx] += e.amount;
+        });
+
+        const hasData = appData.earnings.length > 0 || appData.expenses.length > 0;
+        const isTotalEmpty = Object.keys(appData.fixedExpenses).length === 0 && !hasData;
+
+        if (isTotalEmpty && !appData.isNewUser) {
+            return `
+            <div class="text-center py-20">
+                <h2 class="text-2xl font-bold mb-4">Tudo limpo por aqui!</h2>
+                <p class="text-slate-400 mb-8 max-w-md mx-auto">Comece adicionando seus gastos fixos (aluguel, contas) para que o sistema possa calcular suas metas.</p>
+                <button onclick="appData.activeTab='fixed'; appData.showFixedExpensesEditor=true; renderApp();" class="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-xl font-bold transition-all transform hover:scale-105 shadow-lg shadow-blue-500/30">
+                Adicionar Gastos Fixos
+                </button>
+            </div>
+            `;
         }
 
-        textarea.value = newText;
-        textarea.focus();
-        textarea.setSelectionRange(newCursorPos, newCursorPos);
+        return `
+        <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
+            <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Dashboard</button>
+            <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Mensal</button>
+            <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Fixos</button>
+        </nav>
+
+        <div class="mb-6 flex flex-col md:flex-row gap-4 items-end md:items-center justify-between">
+            <div class="w-full md:w-64">
+            <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Período</label>
+            <select onchange="appData.selectedWeek=this.value; renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                ${getWeeksList().map(week => `
+                <option value="${week}" ${week === appData.selectedWeek ? 'selected' : ''}>
+                    ${getWeekLabel(week)} (${new Date(week).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} - ${new Date(getWeekEnd(week)).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })})
+                </option>
+                `).join('')}
+            </select>
+            </div>
+        </div>
+
+        <div class="bg-gradient-to-br from-blue-900/40 to-slate-800 border border-blue-500/20 rounded-2xl p-6 mb-8 relative overflow-hidden">
+            <div class="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 rounded-full blur-3xl -mr-10 -mt-10"></div>
+            
+            <div class="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 relative z-10">
+            <div>
+                <h2 class="text-3xl font-bold text-white mb-1">Resumo Semanal</h2>
+                <p class="text-sm text-blue-300">
+                Total Líquido vs Gastos
+                </p>
+            </div>
+            <div class="text-left md:text-right mt-4 md:mt-0">
+                <p class="text-4xl font-bold ${weekBalance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">
+                ${formatMoney(weekBalance)}
+                </p>
+            </div>
+            </div>
+
+            <div class="mb-2 relative z-10">
+            <div class="flex justify-between text-sm mb-2">
+                <span class="text-slate-300">Total Líquido: ${formatMoney(weekEarnings)}</span>
+                <div class="flex items-center gap-2 group cursor-pointer" onclick="window.promptWeekGoal()">
+                <span class="text-slate-300 group-hover:text-white transition-colors">Meta: ${formatMoney(appData.weekGoal)}</span>
+                <span class="text-blue-400 text-xs">✏️</span>
+                </div>
+            </div>
+            <div class="w-full bg-slate-700/50 rounded-full h-4 overflow-hidden">
+                <div class="${progressPercentage >= 100 ? 'bg-emerald-500' : 'bg-blue-500'} h-full rounded-full transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(59,130,246,0.5)]" style="width: ${progressPercentage}%"></div>
+            </div>
+            </div>
+        </div>
+
+        <!-- Weekly Chart -->
+        ${renderDayChart(weeklyChartData, 'week')}
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+            <!-- FLUXO DE CAIXA -->
+            <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-5 hover:bg-slate-800 transition-colors">
+                <h3 class="text-lg font-bold text-white mb-4 flex items-center gap-2">
+                    <svg class="w-5 h-5 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    Fluxo de Caixa (Na Mão)
+                </h3>
+                <div class="space-y-2 mb-4">
+                    <div class="flex justify-between text-sm text-slate-300">
+                        <span>Entradas Recebidas</span>
+                        <span class="text-emerald-400 font-medium">+${formatMoney(weekReceived)}</span>
+                    </div>
+                    <div class="flex justify-between text-sm text-slate-300">
+                        <span>Gastos Variáveis</span>
+                        <span class="text-rose-400 font-medium">-${formatMoney(weekExpenses)}</span>
+                    </div>
+                    <div class="flex justify-between text-sm text-slate-300">
+                        <span>Contas Fixas Pagas</span>
+                        <span class="text-rose-400 font-medium">-${formatMoney(paidFixedExpenses)}</span>
+                    </div>
+                </div>
+                <div class="pt-3 border-t border-slate-700 flex justify-between items-center">
+                    <span class="text-sm font-bold uppercase text-slate-400">Saldo Disponível</span>
+                    <span class="text-2xl font-bold ${cashOnHand >= 0 ? 'text-white' : 'text-rose-500'}">${formatMoney(cashOnHand)}</span>
+                </div>
+            </div>
+
+            <!-- CONTROLE DE PAGAMENTOS -->
+            <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-5 hover:bg-slate-800 transition-colors">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-bold text-white flex items-center gap-2">
+                        <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
+                        Contas Fixas
+                    </h3>
+                    <button onclick="appData.showWeeklyAdjustment=!appData.showWeeklyAdjustment; renderApp();" class="text-xs text-blue-400 hover:text-blue-300">
+                    ${hasWeeklyAdjustment ? 'Ajustado (Editar)' : 'Ajustar Total'}
+                    </button>
+                </div>
+                
+                ${hasWeeklyAdjustment ? `
+                    <div class="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-4 text-center mb-4">
+                        <p class="text-xs text-yellow-200 mb-1 font-bold uppercase tracking-wider">Total Manual Definido</p>
+                        <p class="text-2xl font-bold text-yellow-400">${formatMoney(totalFixedExpenses)}</p>
+                    </div>
+                    
+                    ${weeklyAdjustmentNote ? `
+                    <div class="bg-slate-900/50 rounded-lg p-4 border border-slate-700 relative group">
+                        <div class="absolute top-0 left-0 w-1 h-full bg-blue-500/50 rounded-l-lg"></div>
+                        <p class="text-xs text-blue-400 font-bold uppercase mb-2 flex items-center gap-1">
+                            📝 Notas do Ajuste
+                        </p>
+                        <p class="text-sm text-slate-300 leading-relaxed">${parseNoteMarkdown(weeklyAdjustmentNote)}</p>
+                    </div>
+                    ` : ''}
+                ` : `
+                    <div id="fixedExpensesList" class="max-h-48 overflow-y-auto custom-scrollbar pr-2 space-y-2">
+                        ${Object.entries(appData.fixedExpenses).length === 0 ? '<p class="text-xs text-slate-500">Sem contas fixas cadastradas.</p>' : ''}
+                        ${Object.entries(appData.fixedExpenses).flatMap(([cat, items]) => items.map(item => {
+                            const id = `${cat}:${item.name}`;
+                            const isPaid = paidItems.includes(id);
+                            const isOverridden = itemOverrides[id] !== undefined;
+                            const finalValue = isOverridden ? itemOverrides[id] : item.value;
+                            
+                            return `
+                            <div class="flex items-center justify-between p-2 rounded-lg ${isPaid ? 'bg-emerald-900/20 border border-emerald-500/30' : 'bg-slate-700/30 border border-slate-700'} transition-all group">
+                                <div class="flex items-center gap-3 cursor-pointer flex-1" onclick="toggleFixedExpensePayment('${appData.selectedWeek}', '${cat}', '${item.name}')">
+                                    <div class="w-5 h-5 rounded border flex items-center justify-center ${isPaid ? 'bg-emerald-500 border-emerald-500' : 'border-slate-500 bg-slate-800'}">
+                                        ${isPaid ? '<svg class="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>' : ''}
+                                    </div>
+                                    <span class="text-sm ${isPaid ? 'text-emerald-100 line-through opacity-70' : 'text-slate-200'}">${item.name}</span>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <span class="text-sm font-bold ${isPaid ? 'text-emerald-400' : isOverridden ? 'text-blue-400' : 'text-slate-300'}">${formatMoney(finalValue)}</span>
+                                    <button onclick="promptFixedExpenseOverride('${appData.selectedWeek}', '${cat}', '${item.name}', ${finalValue})" class="text-slate-500 hover:text-blue-400 p-1" title="Alterar valor apenas esta semana">✏️</button>
+                                    ${isOverridden ? `<button onclick="resetFixedExpenseOverride('${appData.selectedWeek}', '${cat}', '${item.name}')" class="text-slate-500 hover:text-yellow-400 p-1" title="Restaurar valor padrão">↺</button>` : ''}
+                                </div>
+                            </div>
+                            `
+                        })).join('')}
+                    </div>
+                    <div class="mt-4 pt-3 border-t border-slate-700 flex justify-between text-sm">
+                        <span class="text-slate-400">Falta Pagar:</span>
+                        <span class="font-bold text-rose-400">${formatMoney(pendingFixedExpenses)}</span>
+                    </div>
+                `}
+            </div>
+        </div>
+
+        ${appData.showWeeklyAdjustment ? `
+            <div class="bg-slate-800 border border-slate-600 rounded-xl p-6 mb-8 animate-fade-in">
+            <h3 class="text-lg font-bold mb-4">Ajustar Gastos Fixos - ${getWeekLabel(appData.selectedWeek)}</h3>
+            <p class="text-sm text-slate-400 mb-4">
+                Defina um valor total fixo para esta semana caso os cálculos automáticos não se apliquem. (Isso oculta a lista de verificação).
+            </p>
+            <div class="space-y-3">
+                <div class="flex gap-3">
+                    <input
+                    type="number"
+                    step="0.01"
+                    id="weeklyFixedTotal"
+                    placeholder="Valor Total"
+                    value="${hasWeeklyAdjustment ? appData.weeklyFixedExpenses[appData.selectedWeek].total : totalFixedExpenses}"
+                    class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 focus:border-blue-500 outline-none"
+                    />
+                </div>
+                
+                <div>
+                    <div class="flex gap-2 mb-2">
+                        <button onclick="insertFormatting('bold')" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300 hover:text-white border border-slate-600 text-xs font-bold" title="Negrito">B</button>
+                        <button onclick="insertFormatting('italic')" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300 hover:text-white border border-slate-600 text-xs italic" title="Itálico">I</button>
+                        <button onclick="insertFormatting('underline')" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300 hover:text-white border border-slate-600 text-xs underline" title="Sublinhado">U</button>
+                    </div>
+                    <textarea
+                        id="weeklyFixedNote"
+                        placeholder="Bloco de notas (use **negrito**, *itálico*...)"
+                        class="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-sm focus:border-blue-500 outline-none min-h-[80px]"
+                    >${weeklyAdjustmentNote}</textarea>
+                </div>
+                
+                <div class="flex gap-3">
+                    <button onclick="saveWeeklyAdjustment()" class="flex-1 bg-green-600 hover:bg-green-700 rounded-lg px-6 py-2">Salvar Ajuste</button>
+                    ${hasWeeklyAdjustment ? '<button onclick="removeWeeklyAdjustment()" class="bg-red-600 hover:bg-red-700 rounded-lg px-6 py-2">Restaurar Padrão</button>' : ''}
+                </div>
+            </div>
+            </div>
+        ` : ''}
+
+        <div class="grid md:grid-cols-2 gap-6">
+            <!-- Earnings Section -->
+            <div class="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-xl font-bold flex items-center gap-2">
+                <span class="w-2 h-6 bg-emerald-500 rounded-full"></span>
+                Entradas
+                </h2>
+                <button onclick="appData.showAddEarning=!appData.showAddEarning; renderApp();" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-bold transition-colors">
+                + Novo
+                </button>
+            </div>
+            
+            ${appData.showAddEarning ? renderEarningForm() : ''}
+            
+            <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
+                ${appData.earnings
+                .filter(e => getWeekFromDate(e.date) === appData.selectedWeek)
+                .sort((a, b) => new Date(b.date) - new Date(a.date))
+                .map(earning => {
+                    const platform = getPlatform(earning.platformId);
+                    const net = calculateNetEarning(earning.amount, earning.platformId);
+                    const isReceived = earning.received !== false; // Default true
+                    
+                    return appData.editingEarning === earning.id ? renderEarningForm(earning) : `
+                    <div class="bg-slate-700/30 hover:bg-slate-700/50 rounded-xl p-4 border ${isReceived ? 'border-slate-700' : 'border-yellow-500/50 bg-yellow-500/5'} transition-all">
+                    <div class="flex justify-between items-start">
+                        <div>
+                        <div class="flex items-center gap-2">
+                            <p class="font-bold text-white capitalize">${platform.name}</p>
+                            ${platform.type !== 'none' ? `<span class="text-[10px] px-1.5 py-0.5 bg-slate-600 rounded text-slate-300">${platform.type === 'percent' ? '-' + platform.value + '%' : '-' + formatMoney(platform.value)}</span>` : ''}
+                        </div>
+                        <p class="text-sm text-slate-400">${new Date(earning.date).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</p>
+                        <button onclick="toggleEarningReceived(${earning.id})" class="mt-2 text-xs border px-2 py-0.5 rounded flex items-center gap-1 ${isReceived ? 'border-emerald-500 text-emerald-400 bg-emerald-500/10' : 'border-yellow-500 text-yellow-400 bg-yellow-500/10'}">
+                            ${isReceived ? '✓ Recebido' : '⏳ Pendente'}
+                        </button>
+                        </div>
+                        <div class="flex flex-col items-end">
+                        <div class="flex items-center gap-3 mb-1">
+                            <p class="text-lg font-bold ${isReceived ? 'text-emerald-400' : 'text-yellow-400'}">${formatMoney(earning.amount)}</p>
+                            <div class="flex gap-1">
+                            <button onclick="appData.editingEarning=${earning.id}; renderApp();" class="text-slate-400 hover:text-white p-1">✏️</button>
+                            <button onclick="deleteEarning(${earning.id});" class="text-slate-400 hover:text-rose-400 p-1">🗑️</button>
+                            </div>
+                        </div>
+                        ${platform.type !== 'none' ? `<p class="text-xs text-slate-500">Líquido: ${formatMoney(net)}</p>` : ''}
+                        </div>
+                    </div>
+                    </div>
+                `}).join('')}
+                ${appData.earnings.filter(e => getWeekFromDate(e.date) === appData.selectedWeek).length === 0 ? '<p class="text-center text-slate-500 py-4">Nenhum ganho registrado esta semana.</p>' : ''}
+            </div>
+            </div>
+
+            <!-- Expenses Section -->
+            <div class="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-xl font-bold flex items-center gap-2">
+                <span class="w-2 h-6 bg-rose-500 rounded-full"></span>
+                Variáveis
+                </h2>
+                <button onclick="appData.showAddExpense=!appData.showAddExpense; renderApp();" class="bg-rose-600 hover:bg-rose-700 text-white rounded-lg px-4 py-2 text-sm font-bold transition-colors">
+                + Novo
+                </button>
+            </div>
+
+            ${appData.showAddExpense ? renderExpenseForm() : ''}
+
+            <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
+                ${appData.expenses
+                .filter(e => e.week === appData.selectedWeek)
+                .sort((a, b) => new Date(b.date) - new Date(a.date))
+                .map(expense => appData.editingExpense === expense.id ? renderExpenseForm(expense) : `
+                    <div class="bg-slate-700/30 hover:bg-slate-700/50 rounded-xl p-4 border border-slate-700 transition-all">
+                    <div class="flex justify-between items-center">
+                        <div>
+                        <p class="font-bold text-white">${expense.description}</p>
+                        <p class="text-sm text-slate-400">${new Date(expense.date).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</p>
+                        </div>
+                        <div class="flex items-center gap-3">
+                        <p class="text-lg font-bold text-rose-400">-${formatMoney(expense.amount)}</p>
+                        <div class="flex gap-1">
+                            <button onclick="appData.editingExpense=${expense.id}; renderApp();" class="text-slate-400 hover:text-white p-1">✏️</button>
+                            <button onclick="deleteExpense(${expense.id});" class="text-slate-400 hover:text-rose-400 p-1">🗑️</button>
+                        </div>
+                        </div>
+                    </div>
+                    </div>
+                `).join('')}
+                ${appData.expenses.filter(e => e.week === appData.selectedWeek).length === 0 ? '<p class="text-center text-slate-500 py-4">Nenhum gasto variável esta semana.</p>' : ''}
+            </div>
+            </div>
+        </div>
+        `;
+    }
+
+    function renderMonthly() {
+        const months = [
+        { value: 1, name: 'Janeiro' }, { value: 2, name: 'Fevereiro' }, { value: 3, name: 'Março' },
+        { value: 4, name: 'Abril' }, { value: 5, name: 'Maio' }, { value: 6, name: 'Junho' },
+        { value: 7, name: 'Julho' }, { value: 8, name: 'Agosto' }, { value: 9, name: 'Setembro' },
+        { value: 10, name: 'Outubro' }, { value: 11, name: 'Novembro' }, { value: 12, name: 'Dezembro' }
+        ];
+
+        const years = [];
+        appData.earnings.forEach(e => {
+        const year = new Date(e.date).getFullYear();
+        if (!years.includes(year)) years.push(year);
+        });
+        if (!years.includes(new Date().getFullYear())) years.push(new Date().getFullYear());
+        years.sort().reverse();
+
+        if (!appData.selectedYear) appData.selectedYear = new Date().getFullYear();
+        if (!appData.selectedMonth) appData.selectedMonth = new Date().getMonth() + 1;
+
+        const monthKey = `${appData.selectedYear}-${String(appData.selectedMonth).padStart(2, '0')}`;
+        const monthData = {
+        earningsGross: 0,
+        earningsNet: 0,
+        expensesVariable: 0,
+        expensesFixed: 0,
+        weeks: new Set(),
+        earningsByPlatform: {}
+        };
+
+        const monthDayAggregation = [0,0,0,0,0,0,0];
+
+        appData.earnings.forEach(earning => {
+        const parts = earning.date.split('-');
+        const earningMonth = `${parts[0]}-${parts[1]}`;
+        
+        if (earningMonth === monthKey) {
+            monthData.earningsGross += earning.amount;
+            
+            let jsDay = new Date(earning.date).getDay();
+            let chartIdx = jsDay === 0 ? 6 : jsDay - 1;
+            monthDayAggregation[chartIdx] += earning.amount;
+
+            let platformId = earning.platformId;
+            if (!platformId && earning.platform) {
+                const found = appData.platforms.find(p => p.name.toLowerCase() === earning.platform.toLowerCase());
+                platformId = found ? found.id : appData.platforms[0]?.id;
+            }
+            if (!platformId) platformId = appData.platforms[0]?.id;
+
+            const net = calculateNetEarning(earning.amount, platformId);
+            monthData.earningsNet += net;
+            
+            const pName = getPlatform(platformId).name;
+            monthData.earningsByPlatform[pName] = (monthData.earningsByPlatform[pName] || 0) + earning.amount;
+            monthData.weeks.add(getWeekFromDate(earning.date));
+        }
+        });
+
+        appData.expenses.forEach(expense => {
+        const parts = expense.date.split('-');
+        const expenseMonth = `${parts[0]}-${parts[1]}`;
+        if (expenseMonth === monthKey) monthData.expensesVariable += expense.amount;
+        });
+
+        monthData.weeks.forEach(week => {
+        monthData.expensesFixed += getTotalFixedExpenses(week);
+        });
+        
+        const totalExpenses = monthData.expensesVariable + monthData.expensesFixed;
+        const balance = monthData.earningsNet - totalExpenses;
+
+        const selectedMonthName = months.find(m => m.value === appData.selectedMonth)?.name || 'Mês';
+
+        return `
+        <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
+            <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Dashboard</button>
+            <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Mensal</button>
+            <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Fixos</button>
+        </nav>
+
+        <div class="grid grid-cols-2 gap-4 mb-6">
+            <div>
+            <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Ano</label>
+            <select onchange="appData.selectedYear=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-blue-500">
+                ${years.map(year => `<option value="${year}" ${year === appData.selectedYear ? 'selected' : ''}>${year}</option>`).join('')}
+            </select>
+            </div>
+            <div>
+            <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Mês</label>
+            <select onchange="appData.selectedMonth=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-blue-500">
+                ${months.map(month => `
+                <option value="${month.value}" ${month.value === appData.selectedMonth ? 'selected' : ''}>
+                    ${month.name} ${(appData.selectedYear === new Date().getFullYear() && month.value === new Date().getMonth() + 1) ? '(Atual)' : ''}
+                </option>
+                `).join('')}
+            </select>
+            </div>
+        </div>
+
+        <div class="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
+            <div class="flex items-center justify-between mb-8">
+            <div>
+                <h3 class="text-3xl font-bold capitalize text-white">${selectedMonthName}</h3>
+                <p class="text-sm text-slate-400 mt-1">${appData.selectedYear} • ${monthData.weeks.size} semana(s) ativa(s)</p>
+            </div>
+            <div class="text-right">
+                <p class="text-sm text-slate-400">Saldo Final</p>
+                <p class="text-4xl font-bold ${balance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${formatMoney(balance)}</p>
+            </div>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+            <div class="bg-blue-900/20 border border-blue-500/20 rounded-xl p-4">
+                <p class="text-xs text-blue-400 font-bold uppercase mb-1">Bruto</p>
+                <p class="text-xl font-bold text-white">${formatMoney(monthData.earningsGross)}</p>
+            </div>
+            <div class="bg-emerald-900/20 border border-emerald-500/20 rounded-xl p-4">
+                <p class="text-xs text-emerald-400 font-bold uppercase mb-1">Líquido</p>
+                <p class="text-xl font-bold text-white">${formatMoney(monthData.earningsNet)}</p>
+            </div>
+            <div class="bg-rose-900/20 border border-rose-500/20 rounded-xl p-4">
+                <p class="text-xs text-rose-400 font-bold uppercase mb-1">Varíaveis</p>
+                <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesVariable)}</p>
+            </div>
+            <div class="bg-purple-900/20 border border-purple-500/20 rounded-xl p-4">
+                <p class="text-xs text-purple-400 font-bold uppercase mb-1">Fixos</p>
+                <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesFixed)}</p>
+            </div>
+            </div>
+            
+            <!-- Monthly Aggregation Chart -->
+            ${renderDayChart(monthDayAggregation, 'month')}
+
+            <div class="grid md:grid-cols-2 gap-6">
+            <div>
+                <h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-700 pb-2">Por Fonte</h4>
+                <div class="space-y-3">
+                ${Object.entries(monthData.earningsByPlatform).map(([plat, val]) => val > 0 ? `
+                    <div class="flex justify-between items-center text-sm">
+                    <span class="capitalize text-slate-300">${plat}</span>
+                    <span class="font-bold text-white">${formatMoney(val)}</span>
+                    </div>
+                ` : '').join('')}
+                ${Object.values(monthData.earningsByPlatform).every(v => v === 0) ? '<p class="text-slate-500 text-sm">Sem dados.</p>' : ''}
+                </div>
+            </div>
+            <div>
+                <h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-700 pb-2">Balanço</h4>
+                <div class="space-y-3 text-sm">
+                <div class="flex justify-between"><span>Entradas Líquidas</span><span class="font-bold text-emerald-400">+${formatMoney(monthData.earningsNet)}</span></div>
+                <div class="flex justify-between"><span>Saídas Totais</span><span class="font-bold text-rose-400">-${formatMoney(totalExpenses)}</span></div>
+                </div>
+            </div>
+            </div>
+        </div>
+        `;
+    }
+
+    function renderFixed() {
+        return `
+        <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
+            <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Dashboard</button>
+            <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Mensal</button>
+            <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Fixos</button>
+        </nav>
+
+        <div class="flex flex-col md:flex-row justify-between items-end mb-8">
+            <div>
+                <h2 class="text-3xl font-bold text-white">Gastos Fixos (Semanais)</h2>
+                <p class="text-slate-400 mt-2 max-w-lg">
+                    Estes valores são descontados automaticamente do seu saldo toda semana. Adicione aqui aluguel, contas, seguros, etc (divida o valor mensal por 4 se necessário).
+                </p>
+            </div>
+            <div class="mt-4 md:mt-0 text-right">
+                <p class="text-sm text-slate-400 uppercase tracking-wider">Total Semanal</p>
+                <p class="text-4xl font-bold text-white">${formatMoney(Object.values(appData.fixedExpenses).flat().reduce((sum, exp) => sum + exp.value, 0))}</p>
+            </div>
+        </div>
+
+        <div class="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
+            <div class="flex items-center justify-between mb-6 border-b border-slate-700 pb-4">
+            <h3 class="text-xl font-bold text-white">Categorias</h3>
+            <button onclick="appData.showFixedExpensesEditor=!appData.showFixedExpensesEditor; renderApp();" class="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-6 py-2 transition-colors shadow-lg shadow-blue-500/20">
+                ${appData.showFixedExpensesEditor ? 'Concluir Edição' : '✏️ Editar / Adicionar'}
+            </button>
+            </div>
+
+            ${appData.showFixedExpensesEditor ? renderFixedExpensesEditor() : `
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                ${Object.entries(appData.fixedExpenses).length === 0 ? '<p class="text-slate-500 col-span-3 text-center py-8">Nenhum gasto fixo cadastrado. Clique em Editar para começar.</p>' : ''}
+                ${Object.entries(appData.fixedExpenses).map(([bank, items]) => `
+                <div class="bg-slate-700/30 rounded-xl p-5 border border-slate-700 hover:bg-slate-700/50 transition-colors">
+                    <h3 class="font-bold text-lg mb-4 capitalize text-blue-400 flex items-center gap-2">
+                        <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+                        ${bank}
+                    </h3>
+                    <div class="space-y-3">
+                    ${items.map(item => `
+                        <div class="flex justify-between items-center text-sm group">
+                        <span class="text-slate-300 group-hover:text-white transition-colors">${item.name}</span>
+                        <span class="font-medium text-white">${formatMoney(item.value)}</span>
+                        </div>
+                    `).join('')}
+                    ${items.length === 0 ? '<p class="text-xs text-slate-500">Vazio</p>' : ''}
+                    <div class="pt-3 mt-2 border-t border-slate-600/50 flex justify-between font-bold text-slate-200">
+                        <span>Total</span>
+                        <span>${formatMoney(items.reduce((s, i) => s + i.value, 0))}</span>
+                    </div>
+                    </div>
+                </div>
+                `).join('')}
+            </div>
+            `}
+        </div>
+        `;
+    }
+
+    function renderTutorialOverlay() {
+      if (!appData.isNewUser) return '';
+      return `
+        <div class="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="bg-slate-800 border border-slate-700 rounded-2xl p-8 max-w-md w-full text-center shadow-2xl relative overflow-hidden animate-fade-in">
+            <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-purple-500"></div>
+            <h2 class="text-3xl font-bold mb-4 text-white">Bem-vindo!</h2>
+            <p class="text-slate-300 mb-8">Para começar, por favor selecione a moeda principal que você utiliza.</p>
+            
+            <div class="grid gap-3">
+              <button onclick="finishOnboarding('BRL')" class="flex items-center justify-between px-6 py-4 rounded-xl bg-slate-700 hover:bg-green-600/20 hover:border-green-500 border border-slate-600 transition-all group">
+                <span class="font-bold text-white group-hover:text-green-400">Real Brasileiro</span>
+                <span class="text-slate-400 group-hover:text-green-400 font-mono">R$</span>
+              </button>
+              <button onclick="finishOnboarding('EUR')" class="flex items-center justify-between px-6 py-4 rounded-xl bg-slate-700 hover:bg-blue-600/20 hover:border-blue-500 border border-slate-600 transition-all group">
+                <span class="font-bold text-white group-hover:text-blue-400">Euro</span>
+                <span class="text-slate-400 group-hover:text-blue-400 font-mono">€</span>
+              </button>
+              <button onclick="finishOnboarding('GBP')" class="flex items-center justify-between px-6 py-4 rounded-xl bg-slate-700 hover:bg-purple-600/20 hover:border-purple-500 border border-slate-600 transition-all group">
+                <span class="font-bold text-white group-hover:text-purple-400">Libra Esterlina</span>
+                <span class="text-slate-400 group-hover:text-purple-400 font-mono">£</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderSettingsModal() {
+      if (!appData.showSettings) return '';
+      return `
+        <div class="fixed inset-0 bg-black/60 z-[55] flex items-center justify-center p-4" onclick="if(event.target === this) {appData.showSettings=false; renderApp();}">
+          <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-sm w-full">
+            <h3 class="text-xl font-bold mb-4">Configurações</h3>
+            
+            <div class="mb-6">
+              <label class="block text-sm font-medium mb-2 text-slate-400">Moeda Principal</label>
+              <div class="grid grid-cols-3 gap-2">
+                <button onclick="changeCurrency('BRL')" class="p-2 rounded border ${appData.currency === 'BRL' ? 'bg-blue-600 border-blue-500' : 'bg-slate-700 border-slate-600'}">R$ Real</button>
+                <button onclick="changeCurrency('EUR')" class="p-2 rounded border ${appData.currency === 'EUR' ? 'bg-blue-600 border-blue-500' : 'bg-slate-700 border-slate-600'}">€ Euro</button>
+                <button onclick="changeCurrency('GBP')" class="p-2 rounded border ${appData.currency === 'GBP' ? 'bg-blue-600 border-blue-500' : 'bg-slate-700 border-slate-600'}">£ Libra</button>
+              </div>
+            </div>
+            
+            <div class="mb-4 pt-4 border-t border-slate-700">
+              <h4 class="text-sm font-bold text-rose-400 mb-2 uppercase">Zona de Perigo</h4>
+              <button onclick="clearAllData()" class="w-full bg-rose-900/30 hover:bg-rose-900/50 text-rose-300 border border-rose-800 rounded-lg px-4 py-3 text-sm transition-colors flex items-center justify-center gap-2">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                  Resetar Conta (Apagar Tudo)
+              </button>
+            </div>
+
+            <div class="pt-4 border-t border-slate-700 flex justify-end">
+              <button onclick="appData.showSettings=false; renderApp();" class="text-slate-400 hover:text-white px-4 py-2">Fechar</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderPlatformManager() {
+      if(!appData.showPlatformManager) return '';
+      
+      let editingPlatform = null;
+      if (appData.editingPlatformId) {
+          editingPlatform = appData.platforms.find(p => p.id === appData.editingPlatformId);
+      }
+      
+      const nameVal = editingPlatform ? editingPlatform.name : '';
+      const typeVal = editingPlatform ? editingPlatform.type : 'none';
+      const valueVal = editingPlatform ? editingPlatform.value : '';
+      const titleText = editingPlatform ? 'Editar Fonte' : 'Adicionar Nova Fonte';
+      const btnText = editingPlatform ? 'Atualizar' : 'Adicionar';
+      const cancelEditBtn = editingPlatform ? `<button onclick="appData.editingPlatformId=null; renderApp()" class="text-xs text-slate-400 underline ml-2">Cancelar Edição</button>` : '';
+
+      return `
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-lg w-full shadow-2xl relative animate-fade-in max-h-[90vh] overflow-y-auto">
+          <div class="flex justify-between items-center mb-6">
+              <h3 class="text-xl font-bold text-white">Gerenciar Fontes de Renda</h3>
+              <button onclick="appData.showPlatformManager=false; appData.editingPlatformId=null; renderApp();" class="text-slate-400 hover:text-white">✕</button>
+          </div>
+          
+          <div class="mb-6 bg-slate-700/50 p-4 rounded-lg border border-slate-600">
+              <div class="flex items-center justify-between mb-3">
+                  <h4 class="text-sm font-bold text-blue-400 uppercase">${titleText}</h4>
+                  ${cancelEditBtn}
+              </div>
+              <div class="space-y-3">
+                  <input type="text" id="newPlatName" value="${nameVal}" placeholder="Nome (Ex: Just Eat, Mesada)" class="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm outline-none focus:border-blue-500">
+                  <div class="flex gap-2">
+                      <select id="newPlatType" class="bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm outline-none flex-1">
+                          <option value="none" ${typeVal === 'none' ? 'selected' : ''}>Sem Dedução (100%)</option>
+                          <option value="percent" ${typeVal === 'percent' ? 'selected' : ''}>Porcentagem (%)</option>
+                          <option value="fixed" ${typeVal === 'fixed' ? 'selected' : ''}>Valor Fixo (-)</option>
+                      </select>
+                      <input type="number" id="newPlatValue" value="${valueVal}" placeholder="Valor" class="w-24 bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm outline-none focus:border-blue-500">
+                  </div>
+                  <button onclick="savePlatform('${appData.editingPlatformId || ''}', document.getElementById('newPlatName').value, document.getElementById('newPlatType').value, document.getElementById('newPlatValue').value)" class="w-full bg-blue-600 hover:bg-blue-700 py-2 rounded font-bold text-sm transition-colors">${btnText}</button>
+              </div>
+          </div>
+
+          <div class="space-y-3">
+              ${appData.platforms.map(p => `
+                  <div class="flex items-center justify-between bg-slate-700/30 p-3 rounded-lg border border-slate-700 hover:bg-slate-700/50 transition-colors">
+                      <div>
+                          <p class="font-bold text-white">${p.name}</p>
+                          <p class="text-xs text-slate-400">
+                              ${p.type === 'none' ? 'Sem dedução' : p.type === 'percent' ? `Desconta ${p.value}%` : `Desconta ${formatMoney(p.value)}`}
+                          </p>
+                      </div>
+                      <div class="flex gap-2">
+                          <button onclick="startEditingPlatform('${p.id}')" class="p-2 text-blue-400 hover:bg-blue-500/10 rounded" title="Editar">✏️</button>
+                          <button onclick="deletePlatform('${p.id}')" class="p-2 text-rose-400 hover:bg-rose-500/10 rounded" title="Excluir">🗑️</button>
+                      </div>
+                  </div>
+              `).join('')}
+          </div>
+      </div>
+      `;
+    }
+
+    // ============= MAIN DATA LOADING =============
+    async function loadAllData() {
+      if (!currentUser) return;
+      
+      const earningsSnap = await getDocs(collection(db, `users/${currentUser.uid}/earnings`));
+      const expensesSnap = await getDocs(collection(db, `users/${currentUser.uid}/expenses`));
+      const fixedSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'fixedExpenses'));
+      const weeklyFixedSnap = await getDocs(collection(db, `users/${currentUser.uid}/weeklyFixedExpenses`));
+      const goalSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'weekGoal'));
+      const prefSnap = await getDoc(doc(db, `users/${currentUser.uid}/settings`, 'preferences'));
+
+      // appData is already initialized above, so we can safely set properties
+      window.appData.earnings = [];
+      earningsSnap.forEach(doc => {
+          const data = doc.data();
+          const received = data.received !== undefined ? data.received : true; 
+          window.appData.earnings.push({ id: doc.id, ...data, received });
+      });
+      
+      window.appData.expenses = [];
+      expensesSnap.forEach(doc => window.appData.expenses.push({ id: doc.id, ...doc.data() }));
+      
+      const DEFAULT_PLATFORMS = [{ id: 'geral', name: 'Geral', type: 'none', value: 0 }];
+
+      if (prefSnap.exists()) {
+        const data = prefSnap.data();
+        window.appData.currency = data.currency || detectCurrency();
+        window.appData.platforms = data.platforms || DEFAULT_PLATFORMS;
+        
+        if (data.tutorialComplete === false) {
+             window.appData.isNewUser = true;
+        } else if (data.tutorialComplete === undefined && !fixedSnap.exists()) {
+             window.appData.isNewUser = true;
+        }
+      } else {
+        window.appData.currency = detectCurrency();
+        window.appData.platforms = DEFAULT_PLATFORMS;
+        window.appData.isNewUser = true;
+      }
+
+      if (fixedSnap.exists()) {
+        window.appData.fixedExpenses = fixedSnap.data();
+      } else {
+        window.appData.fixedExpenses = { 'Geral': [] };
+      }
+
+      window.appData.weeklyFixedExpenses = {};
+      weeklyFixedSnap.forEach(doc => {
+        window.appData.weeklyFixedExpenses[doc.id] = doc.data();
+        if (!window.appData.weeklyFixedExpenses[doc.id].paidItems) {
+            window.appData.weeklyFixedExpenses[doc.id].paidItems = [];
+        }
+        if (!window.appData.weeklyFixedExpenses[doc.id].itemOverrides) {
+            window.appData.weeklyFixedExpenses[doc.id].itemOverrides = {};
+        }
+      });
+
+      if (goalSnap.exists()) {
+        window.appData.weekGoal = goalSnap.data().value;
+      }
+
+      window.renderApp();
+    }
+    
+    // Auth observer call
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        currentUser = user;
+        document.getElementById('authScreen').classList.add('hidden');
+        document.getElementById('appScreen').classList.remove('hidden');
+        document.getElementById('userEmail').textContent = user.email;
+        loadAllData();
+      } else {
+        currentUser = null;
+        document.getElementById('authScreen').classList.remove('hidden');
+        document.getElementById('appScreen').classList.add('hidden');
+      }
+    });
+
+    // ============= RENDER WRAPPER =============
+    window.renderApp = () => {
+        const content = document.getElementById('appContent');
+        const modalContainer = document.getElementById('platformManagerModal');
+        if (!content) return;
+
+        let fixedScroll = 0;
+        const fixedList = document.getElementById('fixedExpensesList');
+        if (fixedList) fixedScroll = fixedList.scrollTop;
+
+        let mainContent = '';
+        if (appData.activeTab === 'dashboard') {
+        mainContent = renderDashboard();
+        } else if (appData.activeTab === 'monthly') {
+        mainContent = renderMonthly();
+        } else if (appData.activeTab === 'fixed') {
+        mainContent = renderFixed();
+        }
+
+        content.innerHTML = mainContent + renderSettingsModal() + renderTutorialOverlay();
+        
+        const newFixedList = document.getElementById('fixedExpensesList');
+        if (newFixedList && appData.activeTab === 'dashboard') {
+            newFixedList.scrollTop = fixedScroll;
+        }
+        
+        if(appData.showPlatformManager) {
+            modalContainer.innerHTML = renderPlatformManager();
+            modalContainer.classList.remove('hidden');
+        } else {
+            modalContainer.classList.add('hidden');
+            modalContainer.innerHTML = '';
+        }
     };
 
-    window.parseNoteMarkdown = (text) => {
-        if (!text) return '';
-        // 1. Sanitize HTML to prevent XSS (very important!)
-        let sanitized = text
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
-
-        // 2. Parse Markdown
-        return sanitized
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') // Bold
-            .replace(/\*(.*?)\*/g, '<em>$1</em>') // Italic
-            .replace(/__(.*?)__/g, '<u>$1</u>') // Underline
-            .replace(/\n/g, '<br>'); // Line breaks
-    };
   </script>
 </head>
 <body class="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white min-h-screen font-sans">
@@ -399,6 +1728,19 @@
       <div class="flex justify-end gap-3">
         <button onclick="hideInputModal()" class="px-4 py-2 rounded-lg text-slate-400 hover:bg-slate-700 transition-colors">Cancelar</button>
         <button onclick="handleInputConfirm()" class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold transition-colors">Salvar</button>
+      </div>
+    </div>
+</div>
+
+<!-- DAY DETAILS MODAL -->
+<div id="dayDetailsModal" class="hidden fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+    <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-sm w-full shadow-2xl transform scale-100 transition-transform">
+      <div class="flex justify-between items-center mb-4">
+          <h3 id="dayDetailsTitle" class="text-xl font-bold text-white">Detalhes</h3>
+          <button onclick="closeDayDetails()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <div id="dayDetailsList" class="space-y-2">
+         <!-- Populated via JS -->
       </div>
     </div>
 </div>
@@ -482,1249 +1824,6 @@
 <div id="platformManagerModal" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
    <!-- Rendered by JS -->
 </div>
-
-<script>
-  // ============= APP STATE =============
-  window.appData = {
-    activeTab: 'dashboard',
-    currency: 'GBP',
-    isNewUser: false,
-    showSettings: false,
-    earnings: [],
-    expenses: [],
-    fixedExpenses: {},
-    weeklyFixedExpenses: {},
-    platforms: [], 
-    selectedWeek: getCurrentWeek(),
-    selectedYear: new Date().getFullYear(),
-    selectedMonth: new Date().getMonth() + 1,
-    weekGoal: 500,
-    showAddEarning: false,
-    showAddExpense: false,
-    showFixedExpensesEditor: false,
-    showWeeklyAdjustment: false,
-    showPlatformManager: false,
-    editingEarning: null,
-    editingExpense: null,
-    editingPlatformId: null
-  };
-
-  // Helper para formatar data localmente YYYY-MM-DD sem shift de UTC
-  function toLocalISO(date) {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  }
-
-  function getCurrentWeek() {
-    const now = new Date();
-    const start = new Date(now);
-    const day = start.getDay() || 7; // Domingo vira 7
-    start.setDate(now.getDate() - day + 1); // Volta para Segunda-feira
-    start.setHours(0, 0, 0, 0);
-    return toLocalISO(start);
-  }
-
-  function getWeekEnd(weekStart) {
-    const parts = weekStart.split('-');
-    const start = new Date(parts[0], parts[1] - 1, parts[2]);
-    const end = new Date(start);
-    end.setDate(start.getDate() + 6);
-    return toLocalISO(end);
-  }
-
-  function getWeekFromDate(dateStr) {
-    const parts = dateStr.split('-');
-    const date = new Date(parts[0], parts[1] - 1, parts[2]);
-    const start = new Date(date);
-    const day = start.getDay() || 7; // Domingo vira 7
-    start.setDate(date.getDate() - day + 1);
-    start.setHours(0, 0, 0, 0);
-    return toLocalISO(start);
-  }
-
-  function getTotalFixedExpenses(weekStart) {
-    // Priority 1: Manual Total Override (Old "Weekly Adjustment" that hides checklist)
-    if (appData.weeklyFixedExpenses[weekStart] && appData.weeklyFixedExpenses[weekStart].total !== undefined) {
-      return appData.weeklyFixedExpenses[weekStart].total;
-    }
-
-    // Priority 2: Sum of items (checking for specific item overrides)
-    const overrides = appData.weeklyFixedExpenses[weekStart]?.itemOverrides || {};
-    let total = 0;
-    
-    Object.entries(appData.fixedExpenses).forEach(([cat, items]) => {
-        items.forEach(item => {
-             const key = `${cat}:${item.name}`;
-             if (overrides[key] !== undefined) {
-                 total += overrides[key];
-             } else {
-                 total += item.value;
-             }
-        });
-    });
-    
-    return total;
-  }
-
-  function getPaidFixedExpensesAmount(weekStart) {
-    const weekData = appData.weeklyFixedExpenses[weekStart];
-    if (!weekData || !weekData.paidItems) return 0;
-
-    const overrides = weekData.itemOverrides || {};
-    let totalPaid = 0;
-    
-    // Iterate through configuration to find the values of paid items
-    Object.entries(appData.fixedExpenses).forEach(([cat, items]) => {
-        items.forEach(item => {
-            const id = `${cat}:${item.name}`;
-            if (weekData.paidItems.includes(id)) {
-                 // Use override value if exists, else default
-                 if (overrides[id] !== undefined) {
-                     totalPaid += overrides[id];
-                 } else {
-                     totalPaid += item.value;
-                 }
-            }
-        });
-    });
-    return totalPaid;
-  }
-
-  function getPlatform(id) {
-    return appData.platforms.find(p => p.id === id) || appData.platforms[0] || { name: 'Desconhecido', type: 'none', value: 0 };
-  }
-
-  function calculateNetEarning(amount, platformId) {
-    const p = getPlatform(platformId);
-    let net = amount;
-    if (p.type === 'percent') {
-        net = amount * (1 - p.value / 100);
-    } else if (p.type === 'fixed') {
-        net = amount - p.value;
-    }
-    return net;
-  }
-
-  function getWeekLabel(weekStart) {
-    const currentWeek = getCurrentWeek();
-    const weekDate = new Date(weekStart);
-    const currentDate = new Date(currentWeek);
-    
-    if (weekStart === currentWeek) return 'Semana Atual';
-    const weeksDiff = Math.round((currentDate - weekDate) / (7 * 24 * 60 * 60 * 1000));
-    if (weeksDiff === 1) return 'Semana Passada';
-    if (weeksDiff === 0) return 'Esta Semana';
-    if (weeksDiff < 0) return 'Próxima Semana';
-    return `Há ${weeksDiff} semanas`;
-  }
-
-  function getWeeksList() {
-    const weeks = new Set();
-    appData.earnings.forEach(e => weeks.add(getWeekFromDate(e.date)));
-    appData.expenses.forEach(e => weeks.add(e.week));
-    weeks.add(getCurrentWeek());
-    return Array.from(weeks).sort().reverse();
-  }
-
-  function calculateWeekEarnings(weekStart) {
-    return appData.earnings
-      .filter(e => getWeekFromDate(e.date) === weekStart)
-      .reduce((sum, e) => {
-        return sum + calculateNetEarning(e.amount, e.platformId);
-      }, 0);
-  }
-  
-  function calculateWeekReceivedEarnings(weekStart) {
-    return appData.earnings
-      .filter(e => getWeekFromDate(e.date) === weekStart && e.received)
-      .reduce((sum, e) => {
-        return sum + calculateNetEarning(e.amount, e.platformId);
-      }, 0);
-  }
-
-  function calculateWeekExpenses(weekStart) {
-    return appData.expenses
-      .filter(e => e.week === weekStart)
-      .reduce((sum, e) => sum + e.amount, 0);
-  }
-
-  // ============= ACTIONS =============
-  window.changeCurrency = async (newCurrency) => {
-    appData.currency = newCurrency;
-    appData.showSettings = false;
-    await window.syncPreferences();
-    renderApp();
-    showToast('Moeda alterada com sucesso!', 'success');
-  };
-
-  window.savePlatform = async (id, name, type, value) => {
-     if(!name) return showToast('Nome é obrigatório', 'error');
-     const newVal = parseFloat(value) || 0;
-     
-     if (id) {
-        const idx = appData.platforms.findIndex(p => p.id === id);
-        if(idx >= 0) {
-            appData.platforms[idx] = { ...appData.platforms[idx], name, type, value: newVal };
-        }
-     } else {
-        appData.platforms.push({ id: Date.now().toString(), name, type, value: newVal });
-     }
-     
-     appData.editingPlatformId = null; // Limpa estado de edição
-     await window.syncPreferences();
-     renderApp();
-     showToast(id ? 'Fonte atualizada!' : 'Fonte adicionada!', 'success');
-  };
-  
-  window.startEditingPlatform = (id) => {
-      appData.editingPlatformId = id;
-      renderApp();
-  };
-
-  window.deletePlatform = async (id) => {
-    window.showConfirm('Deletar esta fonte? Os ganhos antigos usarão a regra padrão.', async () => {
-        appData.platforms = appData.platforms.filter(p => p.id !== id);
-        if(appData.editingPlatformId === id) appData.editingPlatformId = null;
-        await window.syncPreferences();
-        renderApp();
-        showToast('Fonte removida', 'info');
-    });
-  };
-
-  // ============= AUTO UPDATE GOAL =============
-  window.checkAndAutoUpdateGoal = async () => {
-      const weekStart = appData.selectedWeek;
-      const varExpenses = calculateWeekExpenses(weekStart);
-      const fixExpenses = getTotalFixedExpenses(weekStart);
-      const total = varExpenses + fixExpenses;
-
-      if (total > appData.weekGoal) {
-          appData.weekGoal = total;
-          await window.syncWeekGoal(total);
-          showToast(`Meta ajustada automaticamente: ${formatMoney(total)}`, 'info');
-      }
-  };
-
-  window.addEarning = async (earning) => {
-    const newEarning = { ...earning, id: Date.now() };
-    appData.earnings.push(newEarning);
-    await window.syncEarning(newEarning);
-    appData.showAddEarning = false;
-    showToast('Entrada adicionada!', 'success');
-    renderApp();
-  };
-
-  window.updateEarning = async (id, updatedEarning) => {
-    const index = appData.earnings.findIndex(e => e.id === id);
-    appData.earnings[index] = { ...updatedEarning, id };
-    await window.syncEarning(appData.earnings[index]);
-    appData.editingEarning = null;
-    showToast('Entrada atualizada!', 'success');
-    renderApp();
-  };
-  
-  window.toggleEarningReceived = async (id) => {
-     const index = appData.earnings.findIndex(e => e.id === id);
-     if(index >= 0) {
-         const newVal = !appData.earnings[index].received;
-         appData.earnings[index].received = newVal;
-         await window.syncEarning(appData.earnings[index]);
-         renderApp();
-     }
-  };
-
-  window.deleteEarning = async (id) => {
-    window.showConfirm('Tem certeza que deseja deletar esta entrada?', async () => {
-        appData.earnings = appData.earnings.filter(e => e.id !== id);
-        await window.deleteEarningFromFirebase(id);
-        renderApp();
-        showToast('Entrada removida.', 'info');
-    });
-  };
-
-  window.addExpense = async (expense) => {
-    const newExpense = { ...expense, id: Date.now() };
-    appData.expenses.push(newExpense);
-    await window.syncExpense(newExpense);
-    
-    await window.checkAndAutoUpdateGoal();
-    
-    appData.showAddExpense = false;
-    showToast('Gasto variável adicionado!', 'success');
-    renderApp();
-  };
-
-  window.updateExpense = async (id, updatedExpense) => {
-    const index = appData.expenses.findIndex(e => e.id === id);
-    appData.expenses[index] = { ...updatedExpense, id };
-    await window.syncExpense(appData.expenses[index]);
-
-    await window.checkAndAutoUpdateGoal();
-
-    appData.editingExpense = null;
-    showToast('Gasto atualizado!', 'success');
-    renderApp();
-  };
-
-  window.deleteExpense = async (id) => {
-    window.showConfirm('Tem certeza que deseja deletar este gasto?', async () => {
-        appData.expenses = appData.expenses.filter(e => e.id !== id);
-        await window.deleteExpenseFromFirebase(id);
-        renderApp();
-        showToast('Gasto removido.', 'info');
-    });
-  };
-
-  window.saveWeeklyAdjustment = async () => {
-    const weekStart = appData.selectedWeek;
-    const newTotal = parseFloat(document.getElementById('weeklyFixedTotal').value) || 0;
-    const note = document.getElementById('weeklyFixedNote').value || '';
-    
-    // Preserve paidItems and itemOverrides if exists
-    const currentData = appData.weeklyFixedExpenses[weekStart] || {};
-    const newData = { ...currentData, total: newTotal, note: note };
-    
-    appData.weeklyFixedExpenses[weekStart] = newData;
-    await window.syncWeeklyFixedExpense(weekStart, newData);
-    
-    await window.checkAndAutoUpdateGoal();
-
-    appData.showWeeklyAdjustment = false;
-    showToast('Ajuste semanal salvo!', 'success');
-    renderApp();
-  };
-
-  window.removeWeeklyAdjustment = async () => {
-    const weekStart = appData.selectedWeek;
-    // Just remove total and note, keep paidItems and overrides
-    if (appData.weeklyFixedExpenses[weekStart]) {
-        delete appData.weeklyFixedExpenses[weekStart].total;
-        delete appData.weeklyFixedExpenses[weekStart].note;
-        await window.syncWeeklyFixedExpense(weekStart, appData.weeklyFixedExpenses[weekStart]);
-    }
-    
-    await window.checkAndAutoUpdateGoal();
-    
-    appData.showWeeklyAdjustment = false;
-    showToast('Ajuste removido, usando valor padrão.', 'info');
-    renderApp();
-  };
-  
-  window.toggleFixedExpensePayment = async (week, category, name) => {
-     const id = `${category}:${name}`;
-     if (!appData.weeklyFixedExpenses[week]) {
-         appData.weeklyFixedExpenses[week] = { paidItems: [], itemOverrides: {} };
-     }
-     
-     const list = appData.weeklyFixedExpenses[week].paidItems || [];
-     if (list.includes(id)) {
-         appData.weeklyFixedExpenses[week].paidItems = list.filter(i => i !== id);
-     } else {
-         appData.weeklyFixedExpenses[week].paidItems = [...list, id];
-     }
-     
-     await window.syncWeeklyFixedExpense(week, appData.weeklyFixedExpenses[week]);
-     renderApp();
-  };
-  
-  // Specific Item Override (Weekly)
-  window.promptFixedExpenseOverride = (week, category, name, currentValue) => {
-      const title = `Valor para ${name} (Esta semana)`;
-      window.showInputModal(title, currentValue, async (val) => {
-          if (!val) return;
-          const newValue = parseFloat(val);
-          const id = `${category}:${name}`;
-          
-          if (!appData.weeklyFixedExpenses[week]) {
-             appData.weeklyFixedExpenses[week] = { paidItems: [], itemOverrides: {} };
-          }
-          if (!appData.weeklyFixedExpenses[week].itemOverrides) {
-             appData.weeklyFixedExpenses[week].itemOverrides = {};
-          }
-          
-          appData.weeklyFixedExpenses[week].itemOverrides[id] = newValue;
-          await window.syncWeeklyFixedExpense(week, appData.weeklyFixedExpenses[week]);
-          await window.checkAndAutoUpdateGoal();
-          renderApp();
-          showToast(`Valor de ${name} alterado para esta semana.`, 'success');
-      });
-  };
-  
-  window.resetFixedExpenseOverride = async (week, category, name) => {
-      const id = `${category}:${name}`;
-      if (appData.weeklyFixedExpenses[week] && appData.weeklyFixedExpenses[week].itemOverrides) {
-          delete appData.weeklyFixedExpenses[week].itemOverrides[id];
-          await window.syncWeeklyFixedExpense(week, appData.weeklyFixedExpenses[week]);
-          await window.checkAndAutoUpdateGoal();
-          renderApp();
-          showToast(`Valor restaurado para o padrão.`, 'info');
-      }
-  };
-
-  window.updateFixedExpenses = async (newFixed) => {
-    appData.fixedExpenses = newFixed;
-    await window.syncFixedExpenses(newFixed);
-    
-    await window.checkAndAutoUpdateGoal();
-    
-    showToast('Gastos fixos atualizados!', 'success');
-    renderApp();
-  };
-
-  window.saveWeekGoal = async (goal) => {
-    appData.weekGoal = goal;
-    await window.syncWeekGoal(goal);
-    renderApp();
-    showToast('Nova meta definida!', 'success');
-  };
-
-  window.promptWeekGoal = () => {
-      window.showInputModal('Nova Meta Semanal', appData.weekGoal, (val) => {
-         if(val) saveWeekGoal(parseFloat(val));
-      });
-  };
-
-  window.finishOnboarding = async (currency) => {
-      appData.currency = currency;
-      appData.isNewUser = false;
-      // Salva preferencia e marca tutorial como completo
-      await window.syncPreferences(true); 
-      renderApp();
-      showToast(`Moeda definida: ${currency}. Bem-vindo!`, 'success');
-  };
-
-
-  // ============= TUTORIAL / ONBOARDING =============
-  function renderTutorialOverlay() {
-    if (!appData.isNewUser) return '';
-    
-    // Simplificado: Apenas seleção de moeda
-    return `
-      <div class="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
-        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-8 max-w-md w-full text-center shadow-2xl relative overflow-hidden animate-fade-in">
-          <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-purple-500"></div>
-          <h2 class="text-3xl font-bold mb-4 text-white">Bem-vindo!</h2>
-          <p class="text-slate-300 mb-8">Para começar, por favor selecione a moeda principal que você utiliza.</p>
-          
-          <div class="grid gap-3">
-            <button onclick="finishOnboarding('BRL')" class="flex items-center justify-between px-6 py-4 rounded-xl bg-slate-700 hover:bg-green-600/20 hover:border-green-500 border border-slate-600 transition-all group">
-              <span class="font-bold text-white group-hover:text-green-400">Real Brasileiro</span>
-              <span class="text-slate-400 group-hover:text-green-400 font-mono">R$</span>
-            </button>
-            <button onclick="finishOnboarding('EUR')" class="flex items-center justify-between px-6 py-4 rounded-xl bg-slate-700 hover:bg-blue-600/20 hover:border-blue-500 border border-slate-600 transition-all group">
-              <span class="font-bold text-white group-hover:text-blue-400">Euro</span>
-              <span class="text-slate-400 group-hover:text-blue-400 font-mono">€</span>
-            </button>
-            <button onclick="finishOnboarding('GBP')" class="flex items-center justify-between px-6 py-4 rounded-xl bg-slate-700 hover:bg-purple-600/20 hover:border-purple-500 border border-slate-600 transition-all group">
-              <span class="font-bold text-white group-hover:text-purple-400">Libra Esterlina</span>
-              <span class="text-slate-400 group-hover:text-purple-400 font-mono">£</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderSettingsModal() {
-    if (!appData.showSettings) return '';
-    return `
-      <div class="fixed inset-0 bg-black/60 z-[55] flex items-center justify-center p-4" onclick="if(event.target === this) {appData.showSettings=false; renderApp();}">
-        <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-sm w-full">
-          <h3 class="text-xl font-bold mb-4">Configurações</h3>
-          
-          <div class="mb-6">
-            <label class="block text-sm font-medium mb-2 text-slate-400">Moeda Principal</label>
-            <div class="grid grid-cols-3 gap-2">
-              <button onclick="changeCurrency('BRL')" class="p-2 rounded border ${appData.currency === 'BRL' ? 'bg-blue-600 border-blue-500' : 'bg-slate-700 border-slate-600'}">R$ Real</button>
-              <button onclick="changeCurrency('EUR')" class="p-2 rounded border ${appData.currency === 'EUR' ? 'bg-blue-600 border-blue-500' : 'bg-slate-700 border-slate-600'}">€ Euro</button>
-              <button onclick="changeCurrency('GBP')" class="p-2 rounded border ${appData.currency === 'GBP' ? 'bg-blue-600 border-blue-500' : 'bg-slate-700 border-slate-600'}">£ Libra</button>
-            </div>
-          </div>
-          
-          <div class="mb-4 pt-4 border-t border-slate-700">
-             <h4 class="text-sm font-bold text-rose-400 mb-2 uppercase">Zona de Perigo</h4>
-             <button onclick="clearAllData()" class="w-full bg-rose-900/30 hover:bg-rose-900/50 text-rose-300 border border-rose-800 rounded-lg px-4 py-3 text-sm transition-colors flex items-center justify-center gap-2">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                Resetar Conta (Apagar Tudo)
-             </button>
-          </div>
-
-          <div class="pt-4 border-t border-slate-700 flex justify-end">
-            <button onclick="appData.showSettings=false; renderApp();" class="text-slate-400 hover:text-white px-4 py-2">Fechar</button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderPlatformManager() {
-    if(!appData.showPlatformManager) return '';
-    
-    // Determine se estamos editando ou adicionando
-    let editingPlatform = null;
-    if (appData.editingPlatformId) {
-        editingPlatform = appData.platforms.find(p => p.id === appData.editingPlatformId);
-    }
-    
-    const nameVal = editingPlatform ? editingPlatform.name : '';
-    const typeVal = editingPlatform ? editingPlatform.type : 'none';
-    const valueVal = editingPlatform ? editingPlatform.value : '';
-    const titleText = editingPlatform ? 'Editar Fonte' : 'Adicionar Nova Fonte';
-    const btnText = editingPlatform ? 'Atualizar' : 'Adicionar';
-    const cancelEditBtn = editingPlatform ? `<button onclick="appData.editingPlatformId=null; renderApp()" class="text-xs text-slate-400 underline ml-2">Cancelar Edição</button>` : '';
-
-    return `
-    <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-lg w-full shadow-2xl relative animate-fade-in max-h-[90vh] overflow-y-auto">
-        <div class="flex justify-between items-center mb-6">
-            <h3 class="text-xl font-bold text-white">Gerenciar Fontes de Renda</h3>
-            <button onclick="appData.showPlatformManager=false; appData.editingPlatformId=null; renderApp();" class="text-slate-400 hover:text-white">✕</button>
-        </div>
-        
-        <div class="mb-6 bg-slate-700/50 p-4 rounded-lg border border-slate-600">
-            <div class="flex items-center justify-between mb-3">
-                <h4 class="text-sm font-bold text-blue-400 uppercase">${titleText}</h4>
-                ${cancelEditBtn}
-            </div>
-            <div class="space-y-3">
-                <input type="text" id="newPlatName" value="${nameVal}" placeholder="Nome (Ex: Just Eat, Mesada)" class="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm outline-none focus:border-blue-500">
-                <div class="flex gap-2">
-                    <select id="newPlatType" class="bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm outline-none flex-1">
-                        <option value="none" ${typeVal === 'none' ? 'selected' : ''}>Sem Dedução (100%)</option>
-                        <option value="percent" ${typeVal === 'percent' ? 'selected' : ''}>Porcentagem (%)</option>
-                        <option value="fixed" ${typeVal === 'fixed' ? 'selected' : ''}>Valor Fixo (-)</option>
-                    </select>
-                    <input type="number" id="newPlatValue" value="${valueVal}" placeholder="Valor" class="w-24 bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm outline-none focus:border-blue-500">
-                </div>
-                <button onclick="savePlatform('${appData.editingPlatformId || ''}', document.getElementById('newPlatName').value, document.getElementById('newPlatType').value, document.getElementById('newPlatValue').value)" class="w-full bg-blue-600 hover:bg-blue-700 py-2 rounded font-bold text-sm transition-colors">${btnText}</button>
-            </div>
-        </div>
-
-        <div class="space-y-3">
-            ${appData.platforms.map(p => `
-                <div class="flex items-center justify-between bg-slate-700/30 p-3 rounded-lg border border-slate-700 hover:bg-slate-700/50 transition-colors">
-                    <div>
-                        <p class="font-bold text-white">${p.name}</p>
-                        <p class="text-xs text-slate-400">
-                            ${p.type === 'none' ? 'Sem dedução' : p.type === 'percent' ? `Desconta ${p.value}%` : `Desconta ${formatMoney(p.value)}`}
-                        </p>
-                    </div>
-                    <div class="flex gap-2">
-                         <button onclick="startEditingPlatform('${p.id}')" class="p-2 text-blue-400 hover:bg-blue-500/10 rounded" title="Editar">✏️</button>
-                         <button onclick="deletePlatform('${p.id}')" class="p-2 text-rose-400 hover:bg-rose-500/10 rounded" title="Excluir">🗑️</button>
-                    </div>
-                </div>
-            `).join('')}
-        </div>
-    </div>
-    `;
-  }
-
-  // ============= RENDER =============
-  window.renderApp = () => {
-    const content = document.getElementById('appContent');
-    const modalContainer = document.getElementById('platformManagerModal');
-    if (!content) return;
-
-    let mainContent = '';
-    if (appData.activeTab === 'dashboard') {
-      mainContent = renderDashboard();
-    } else if (appData.activeTab === 'monthly') {
-      mainContent = renderMonthly();
-    } else if (appData.activeTab === 'fixed') {
-      mainContent = renderFixed();
-    }
-
-    content.innerHTML = mainContent + renderSettingsModal() + renderTutorialOverlay();
-    
-    // Render Modal
-    if(appData.showPlatformManager) {
-        modalContainer.innerHTML = renderPlatformManager();
-        modalContainer.classList.remove('hidden');
-    } else {
-        modalContainer.classList.add('hidden');
-        modalContainer.innerHTML = '';
-    }
-  };
-
-  function renderDashboard() {
-    const weekEarnings = calculateWeekEarnings(appData.selectedWeek);
-    const weekReceived = calculateWeekReceivedEarnings(appData.selectedWeek);
-    const weekExpenses = calculateWeekExpenses(appData.selectedWeek);
-    const totalFixedExpenses = getTotalFixedExpenses(appData.selectedWeek);
-    const paidFixedExpenses = getPaidFixedExpensesAmount(appData.selectedWeek);
-    const pendingFixedExpenses = totalFixedExpenses - paidFixedExpenses;
-    
-    // Logic for Cash Flow
-    // Dinheiro na Mão = Ganhos Recebidos - Gastos Variáveis (Ja assumimos que gasto variavel sai na hora) - Contas Fixas PAGAS
-    const cashOnHand = weekReceived - weekExpenses - paidFixedExpenses;
-
-    const weekBalance = weekEarnings - weekExpenses - totalFixedExpenses;
-    const progressPercentage = Math.min((weekEarnings / appData.weekGoal) * 100, 100);
-    const hasWeeklyAdjustment = appData.weeklyFixedExpenses[appData.selectedWeek] && appData.weeklyFixedExpenses[appData.selectedWeek].total !== undefined;
-    const weeklyAdjustmentNote = hasWeeklyAdjustment ? (appData.weeklyFixedExpenses[appData.selectedWeek].note || '') : '';
-    
-    // For Fixed Checklist
-    const weekFixedData = appData.weeklyFixedExpenses[appData.selectedWeek] || { paidItems: [], itemOverrides: {} };
-    const paidItems = weekFixedData.paidItems || [];
-    const itemOverrides = weekFixedData.itemOverrides || {};
-
-    const hasData = appData.earnings.length > 0 || appData.expenses.length > 0;
-    const isTotalEmpty = Object.keys(appData.fixedExpenses).length === 0 && !hasData;
-
-    if (isTotalEmpty && !appData.isNewUser) {
-        return `
-          <div class="text-center py-20">
-            <h2 class="text-2xl font-bold mb-4">Tudo limpo por aqui!</h2>
-            <p class="text-slate-400 mb-8 max-w-md mx-auto">Comece adicionando seus gastos fixos (aluguel, contas) para que o sistema possa calcular suas metas.</p>
-            <button onclick="appData.activeTab='fixed'; appData.showFixedExpensesEditor=true; renderApp();" class="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-xl font-bold transition-all transform hover:scale-105 shadow-lg shadow-blue-500/30">
-              Adicionar Gastos Fixos
-            </button>
-          </div>
-        `;
-    }
-
-    return `
-      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
-        <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Dashboard</button>
-        <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Mensal</button>
-        <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Fixos</button>
-      </nav>
-
-      <div class="mb-6 flex flex-col md:flex-row gap-4 items-end md:items-center justify-between">
-        <div class="w-full md:w-64">
-          <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Período</label>
-          <select onchange="appData.selectedWeek=this.value; renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
-            ${getWeeksList().map(week => `
-              <option value="${week}" ${week === appData.selectedWeek ? 'selected' : ''}>
-                ${getWeekLabel(week)} (${new Date(week).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} - ${new Date(getWeekEnd(week)).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })})
-              </option>
-            `).join('')}
-          </select>
-        </div>
-      </div>
-
-      <div class="bg-gradient-to-br from-blue-900/40 to-slate-800 border border-blue-500/20 rounded-2xl p-6 mb-8 relative overflow-hidden">
-        <div class="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 rounded-full blur-3xl -mr-10 -mt-10"></div>
-        
-        <div class="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 relative z-10">
-          <div>
-            <h2 class="text-3xl font-bold text-white mb-1">Resumo Semanal</h2>
-            <p class="text-sm text-blue-300">
-             Total Líquido vs Gastos
-            </p>
-          </div>
-          <div class="text-left md:text-right mt-4 md:mt-0">
-            <p class="text-4xl font-bold ${weekBalance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">
-              ${formatMoney(weekBalance)}
-            </p>
-          </div>
-        </div>
-
-        <div class="mb-2 relative z-10">
-          <div class="flex justify-between text-sm mb-2">
-            <span class="text-slate-300">Total Líquido: ${formatMoney(weekEarnings)}</span>
-            <div class="flex items-center gap-2 group cursor-pointer" onclick="window.promptWeekGoal()">
-              <span class="text-slate-300 group-hover:text-white transition-colors">Meta: ${formatMoney(appData.weekGoal)}</span>
-              <span class="text-blue-400 text-xs">✏️</span>
-            </div>
-          </div>
-          <div class="w-full bg-slate-700/50 rounded-full h-4 overflow-hidden">
-            <div class="${progressPercentage >= 100 ? 'bg-emerald-500' : 'bg-blue-500'} h-full rounded-full transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(59,130,246,0.5)]" style="width: ${progressPercentage}%"></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-        <!-- FLUXO DE CAIXA -->
-        <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-5 hover:bg-slate-800 transition-colors">
-            <h3 class="text-lg font-bold text-white mb-4 flex items-center gap-2">
-                <svg class="w-5 h-5 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                Fluxo de Caixa (Na Mão)
-            </h3>
-            <div class="space-y-2 mb-4">
-                 <div class="flex justify-between text-sm text-slate-300">
-                    <span>Entradas Recebidas</span>
-                    <span class="text-emerald-400 font-medium">+${formatMoney(weekReceived)}</span>
-                 </div>
-                 <div class="flex justify-between text-sm text-slate-300">
-                    <span>Gastos Variáveis</span>
-                    <span class="text-rose-400 font-medium">-${formatMoney(weekExpenses)}</span>
-                 </div>
-                 <div class="flex justify-between text-sm text-slate-300">
-                    <span>Contas Fixas Pagas</span>
-                    <span class="text-rose-400 font-medium">-${formatMoney(paidFixedExpenses)}</span>
-                 </div>
-            </div>
-            <div class="pt-3 border-t border-slate-700 flex justify-between items-center">
-                <span class="text-sm font-bold uppercase text-slate-400">Saldo Disponível</span>
-                <span class="text-2xl font-bold ${cashOnHand >= 0 ? 'text-white' : 'text-rose-500'}">${formatMoney(cashOnHand)}</span>
-            </div>
-        </div>
-
-        <!-- CONTROLE DE PAGAMENTOS -->
-        <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-5 hover:bg-slate-800 transition-colors">
-             <div class="flex justify-between items-center mb-4">
-                <h3 class="text-lg font-bold text-white flex items-center gap-2">
-                    <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
-                    Contas Fixas
-                </h3>
-                <button onclick="appData.showWeeklyAdjustment=!appData.showWeeklyAdjustment; renderApp();" class="text-xs text-blue-400 hover:text-blue-300">
-                   ${hasWeeklyAdjustment ? 'Ajustado (Editar)' : 'Ajustar Total'}
-                </button>
-             </div>
-             
-             ${hasWeeklyAdjustment ? `
-                 <div class="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-4 text-center mb-4">
-                    <p class="text-xs text-yellow-200 mb-1 font-bold uppercase tracking-wider">Total Manual Definido</p>
-                    <p class="text-2xl font-bold text-yellow-400">${formatMoney(totalFixedExpenses)}</p>
-                 </div>
-                 
-                 ${weeklyAdjustmentNote ? `
-                 <div class="bg-slate-900/50 rounded-lg p-4 border border-slate-700 relative group">
-                     <div class="absolute top-0 left-0 w-1 h-full bg-blue-500/50 rounded-l-lg"></div>
-                     <p class="text-xs text-blue-400 font-bold uppercase mb-2 flex items-center gap-1">
-                         📝 Notas do Ajuste
-                     </p>
-                     <p class="text-sm text-slate-300 leading-relaxed">${parseNoteMarkdown(weeklyAdjustmentNote)}</p>
-                 </div>
-                 ` : ''}
-             ` : `
-                 <div class="max-h-48 overflow-y-auto custom-scrollbar pr-2 space-y-2">
-                    ${Object.entries(appData.fixedExpenses).length === 0 ? '<p class="text-xs text-slate-500">Sem contas fixas cadastradas.</p>' : ''}
-                    ${Object.entries(appData.fixedExpenses).flatMap(([cat, items]) => items.map(item => {
-                        const id = `${cat}:${item.name}`;
-                        const isPaid = paidItems.includes(id);
-                        const isOverridden = itemOverrides[id] !== undefined;
-                        const finalValue = isOverridden ? itemOverrides[id] : item.value;
-                        
-                        return `
-                        <div class="flex items-center justify-between p-2 rounded-lg ${isPaid ? 'bg-emerald-900/20 border border-emerald-500/30' : 'bg-slate-700/30 border border-slate-700'} transition-all group">
-                             <div class="flex items-center gap-3 cursor-pointer flex-1" onclick="toggleFixedExpensePayment('${appData.selectedWeek}', '${cat}', '${item.name}')">
-                                 <div class="w-5 h-5 rounded border flex items-center justify-center ${isPaid ? 'bg-emerald-500 border-emerald-500' : 'border-slate-500 bg-slate-800'}">
-                                     ${isPaid ? '<svg class="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>' : ''}
-                                 </div>
-                                 <span class="text-sm ${isPaid ? 'text-emerald-100 line-through opacity-70' : 'text-slate-200'}">${item.name}</span>
-                             </div>
-                             <div class="flex items-center gap-2">
-                                <span class="text-sm font-bold ${isPaid ? 'text-emerald-400' : isOverridden ? 'text-blue-400' : 'text-slate-300'}">${formatMoney(finalValue)}</span>
-                                <button onclick="promptFixedExpenseOverride('${appData.selectedWeek}', '${cat}', '${item.name}', ${finalValue})" class="text-slate-500 hover:text-blue-400 p-1" title="Alterar valor apenas esta semana">✏️</button>
-                                ${isOverridden ? `<button onclick="resetFixedExpenseOverride('${appData.selectedWeek}', '${cat}', '${item.name}')" class="text-slate-500 hover:text-yellow-400 p-1" title="Restaurar valor padrão">↺</button>` : ''}
-                             </div>
-                        </div>
-                        `
-                    })).join('')}
-                 </div>
-                 <div class="mt-4 pt-3 border-t border-slate-700 flex justify-between text-sm">
-                    <span class="text-slate-400">Falta Pagar:</span>
-                    <span class="font-bold text-rose-400">${formatMoney(pendingFixedExpenses)}</span>
-                 </div>
-             `}
-        </div>
-      </div>
-
-      ${appData.showWeeklyAdjustment ? `
-        <div class="bg-slate-800 border border-slate-600 rounded-xl p-6 mb-8 animate-fade-in">
-          <h3 class="text-lg font-bold mb-4">Ajustar Gastos Fixos - ${getWeekLabel(appData.selectedWeek)}</h3>
-          <p class="text-sm text-slate-400 mb-4">
-            Defina um valor total fixo para esta semana caso os cálculos automáticos não se apliquem. (Isso oculta a lista de verificação).
-          </p>
-          <div class="space-y-3">
-            <div class="flex gap-3">
-                <input
-                type="number"
-                step="0.01"
-                id="weeklyFixedTotal"
-                placeholder="Valor Total"
-                value="${hasWeeklyAdjustment ? appData.weeklyFixedExpenses[appData.selectedWeek].total : totalFixedExpenses}"
-                class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 focus:border-blue-500 outline-none"
-                />
-            </div>
-            
-            <div>
-                 <div class="flex gap-2 mb-2">
-                    <button onclick="insertFormatting('bold')" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300 hover:text-white border border-slate-600 text-xs font-bold" title="Negrito">B</button>
-                    <button onclick="insertFormatting('italic')" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300 hover:text-white border border-slate-600 text-xs italic" title="Itálico">I</button>
-                    <button onclick="insertFormatting('underline')" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-300 hover:text-white border border-slate-600 text-xs underline" title="Sublinhado">U</button>
-                 </div>
-                <textarea
-                    id="weeklyFixedNote"
-                    placeholder="Bloco de notas (use **negrito**, *itálico*...)"
-                    class="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-sm focus:border-blue-500 outline-none min-h-[80px]"
-                >${weeklyAdjustmentNote}</textarea>
-            </div>
-            
-            <div class="flex gap-3">
-                <button onclick="saveWeeklyAdjustment()" class="flex-1 bg-green-600 hover:bg-green-700 rounded-lg px-6 py-2">Salvar Ajuste</button>
-                ${hasWeeklyAdjustment ? '<button onclick="removeWeeklyAdjustment()" class="bg-red-600 hover:bg-red-700 rounded-lg px-6 py-2">Restaurar Padrão</button>' : ''}
-            </div>
-          </div>
-        </div>
-      ` : ''}
-
-      <div class="grid md:grid-cols-2 gap-6">
-        <!-- Earnings Section -->
-        <div class="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6">
-          <div class="flex items-center justify-between mb-6">
-            <h2 class="text-xl font-bold flex items-center gap-2">
-              <span class="w-2 h-6 bg-emerald-500 rounded-full"></span>
-              Entradas
-            </h2>
-            <button onclick="appData.showAddEarning=!appData.showAddEarning; renderApp();" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-bold transition-colors">
-              + Novo
-            </button>
-          </div>
-          
-          ${appData.showAddEarning ? renderEarningForm() : ''}
-          
-          <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-            ${appData.earnings
-              .filter(e => getWeekFromDate(e.date) === appData.selectedWeek)
-              .sort((a, b) => new Date(b.date) - new Date(a.date))
-              .map(earning => {
-                const platform = getPlatform(earning.platformId);
-                const net = calculateNetEarning(earning.amount, earning.platformId);
-                const isReceived = earning.received !== false; // Default true
-                
-                return appData.editingEarning === earning.id ? renderEarningForm(earning) : `
-                <div class="bg-slate-700/30 hover:bg-slate-700/50 rounded-xl p-4 border ${isReceived ? 'border-slate-700' : 'border-yellow-500/50 bg-yellow-500/5'} transition-all">
-                  <div class="flex justify-between items-start">
-                    <div>
-                      <div class="flex items-center gap-2">
-                        <p class="font-bold text-white capitalize">${platform.name}</p>
-                        ${platform.type !== 'none' ? `<span class="text-[10px] px-1.5 py-0.5 bg-slate-600 rounded text-slate-300">${platform.type === 'percent' ? '-' + platform.value + '%' : '-' + formatMoney(platform.value)}</span>` : ''}
-                      </div>
-                      <p class="text-sm text-slate-400">${new Date(earning.date).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</p>
-                      <button onclick="toggleEarningReceived(${earning.id})" class="mt-2 text-xs border px-2 py-0.5 rounded flex items-center gap-1 ${isReceived ? 'border-emerald-500 text-emerald-400 bg-emerald-500/10' : 'border-yellow-500 text-yellow-400 bg-yellow-500/10'}">
-                         ${isReceived ? '✓ Recebido' : '⏳ Pendente'}
-                      </button>
-                    </div>
-                    <div class="flex flex-col items-end">
-                      <div class="flex items-center gap-3 mb-1">
-                        <p class="text-lg font-bold ${isReceived ? 'text-emerald-400' : 'text-yellow-400'}">${formatMoney(earning.amount)}</p>
-                         <div class="flex gap-1">
-                          <button onclick="appData.editingEarning=${earning.id}; renderApp();" class="text-slate-400 hover:text-white p-1">✏️</button>
-                          <button onclick="deleteEarning(${earning.id});" class="text-slate-400 hover:text-rose-400 p-1">🗑️</button>
-                        </div>
-                      </div>
-                      ${platform.type !== 'none' ? `<p class="text-xs text-slate-500">Líquido: ${formatMoney(net)}</p>` : ''}
-                    </div>
-                  </div>
-                </div>
-              `}).join('')}
-              ${appData.earnings.filter(e => getWeekFromDate(e.date) === appData.selectedWeek).length === 0 ? '<p class="text-center text-slate-500 py-4">Nenhum ganho registrado esta semana.</p>' : ''}
-          </div>
-        </div>
-
-        <!-- Expenses Section -->
-        <div class="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6">
-          <div class="flex items-center justify-between mb-6">
-            <h2 class="text-xl font-bold flex items-center gap-2">
-              <span class="w-2 h-6 bg-rose-500 rounded-full"></span>
-              Variáveis
-            </h2>
-            <button onclick="appData.showAddExpense=!appData.showAddExpense; renderApp();" class="bg-rose-600 hover:bg-rose-700 text-white rounded-lg px-4 py-2 text-sm font-bold transition-colors">
-              + Novo
-            </button>
-          </div>
-
-          ${appData.showAddExpense ? renderExpenseForm() : ''}
-
-          <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-            ${appData.expenses
-              .filter(e => e.week === appData.selectedWeek)
-              .sort((a, b) => new Date(b.date) - new Date(a.date))
-              .map(expense => appData.editingExpense === expense.id ? renderExpenseForm(expense) : `
-                <div class="bg-slate-700/30 hover:bg-slate-700/50 rounded-xl p-4 border border-slate-700 transition-all">
-                  <div class="flex justify-between items-center">
-                    <div>
-                      <p class="font-bold text-white">${expense.description}</p>
-                      <p class="text-sm text-slate-400">${new Date(expense.date).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</p>
-                    </div>
-                    <div class="flex items-center gap-3">
-                      <p class="text-lg font-bold text-rose-400">-${formatMoney(expense.amount)}</p>
-                      <div class="flex gap-1">
-                        <button onclick="appData.editingExpense=${expense.id}; renderApp();" class="text-slate-400 hover:text-white p-1">✏️</button>
-                        <button onclick="deleteExpense(${expense.id});" class="text-slate-400 hover:text-rose-400 p-1">🗑️</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              `).join('')}
-              ${appData.expenses.filter(e => e.week === appData.selectedWeek).length === 0 ? '<p class="text-center text-slate-500 py-4">Nenhum gasto variável esta semana.</p>' : ''}
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderMonthly() {
-    const months = [
-      { value: 1, name: 'Janeiro' }, { value: 2, name: 'Fevereiro' }, { value: 3, name: 'Março' },
-      { value: 4, name: 'Abril' }, { value: 5, name: 'Maio' }, { value: 6, name: 'Junho' },
-      { value: 7, name: 'Julho' }, { value: 8, name: 'Agosto' }, { value: 9, name: 'Setembro' },
-      { value: 10, name: 'Outubro' }, { value: 11, name: 'Novembro' }, { value: 12, name: 'Dezembro' }
-    ];
-
-    const years = [];
-    appData.earnings.forEach(e => {
-      const year = new Date(e.date).getFullYear();
-      if (!years.includes(year)) years.push(year);
-    });
-    if (!years.includes(new Date().getFullYear())) years.push(new Date().getFullYear());
-    years.sort().reverse();
-
-    // Default to current if not set
-    if (!appData.selectedYear) appData.selectedYear = new Date().getFullYear();
-    if (!appData.selectedMonth) appData.selectedMonth = new Date().getMonth() + 1;
-
-    const monthKey = `${appData.selectedYear}-${String(appData.selectedMonth).padStart(2, '0')}`;
-    const monthData = {
-      earningsGross: 0,
-      earningsNet: 0,
-      expensesVariable: 0,
-      expensesFixed: 0,
-      weeks: new Set(),
-      earningsByPlatform: {}
-    };
-
-    appData.earnings.forEach(earning => {
-      const parts = earning.date.split('-');
-      const earningMonth = `${parts[0]}-${parts[1]}`;
-      
-      if (earningMonth === monthKey) {
-        monthData.earningsGross += earning.amount;
-        
-        let platformId = earning.platformId;
-        if (!platformId && earning.platform) {
-            const found = appData.platforms.find(p => p.name.toLowerCase() === earning.platform.toLowerCase());
-            platformId = found ? found.id : appData.platforms[0]?.id;
-        }
-        if (!platformId) platformId = appData.platforms[0]?.id;
-
-        const net = calculateNetEarning(earning.amount, platformId);
-        monthData.earningsNet += net;
-        
-        const pName = getPlatform(platformId).name;
-        monthData.earningsByPlatform[pName] = (monthData.earningsByPlatform[pName] || 0) + earning.amount;
-        monthData.weeks.add(getWeekFromDate(earning.date));
-      }
-    });
-
-    appData.expenses.forEach(expense => {
-      const parts = expense.date.split('-');
-      const expenseMonth = `${parts[0]}-${parts[1]}`;
-      if (expenseMonth === monthKey) monthData.expensesVariable += expense.amount;
-    });
-
-    monthData.weeks.forEach(week => {
-      monthData.expensesFixed += getTotalFixedExpenses(week);
-    });
-    
-    const totalExpenses = monthData.expensesVariable + monthData.expensesFixed;
-    const balance = monthData.earningsNet - totalExpenses;
-
-    const selectedMonthName = months.find(m => m.value === appData.selectedMonth)?.name || 'Mês';
-
-    return `
-      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
-        <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Dashboard</button>
-        <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Mensal</button>
-        <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Fixos</button>
-      </nav>
-
-      <div class="grid grid-cols-2 gap-4 mb-6">
-        <div>
-          <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Ano</label>
-          <select onchange="appData.selectedYear=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-blue-500">
-            ${years.map(year => `<option value="${year}" ${year === appData.selectedYear ? 'selected' : ''}>${year}</option>`).join('')}
-          </select>
-        </div>
-        <div>
-          <label class="block text-xs font-medium mb-1 text-slate-400 uppercase tracking-wider">Mês</label>
-          <select onchange="appData.selectedMonth=parseInt(this.value); renderApp();" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-blue-500">
-            ${months.map(month => `
-              <option value="${month.value}" ${month.value === appData.selectedMonth ? 'selected' : ''}>
-                ${month.name} ${(appData.selectedYear === new Date().getFullYear() && month.value === new Date().getMonth() + 1) ? '(Atual)' : ''}
-              </option>
-            `).join('')}
-          </select>
-        </div>
-      </div>
-
-      <div class="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
-        <div class="flex items-center justify-between mb-8">
-          <div>
-            <h3 class="text-3xl font-bold capitalize text-white">${selectedMonthName}</h3>
-            <p class="text-sm text-slate-400 mt-1">${appData.selectedYear} • ${monthData.weeks.size} semana(s) ativa(s)</p>
-          </div>
-          <div class="text-right">
-            <p class="text-sm text-slate-400">Saldo Final</p>
-            <p class="text-4xl font-bold ${balance >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${formatMoney(balance)}</p>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <div class="bg-blue-900/20 border border-blue-500/20 rounded-xl p-4">
-            <p class="text-xs text-blue-400 font-bold uppercase mb-1">Bruto</p>
-            <p class="text-xl font-bold text-white">${formatMoney(monthData.earningsGross)}</p>
-          </div>
-          <div class="bg-emerald-900/20 border border-emerald-500/20 rounded-xl p-4">
-            <p class="text-xs text-emerald-400 font-bold uppercase mb-1">Líquido</p>
-            <p class="text-xl font-bold text-white">${formatMoney(monthData.earningsNet)}</p>
-          </div>
-          <div class="bg-rose-900/20 border border-rose-500/20 rounded-xl p-4">
-            <p class="text-xs text-rose-400 font-bold uppercase mb-1">Varíaveis</p>
-            <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesVariable)}</p>
-          </div>
-          <div class="bg-purple-900/20 border border-purple-500/20 rounded-xl p-4">
-            <p class="text-xs text-purple-400 font-bold uppercase mb-1">Fixos</p>
-            <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesFixed)}</p>
-          </div>
-        </div>
-
-        <div class="grid md:grid-cols-2 gap-6">
-          <div>
-            <h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-700 pb-2">Por Fonte</h4>
-            <div class="space-y-3">
-              ${Object.entries(monthData.earningsByPlatform).map(([plat, val]) => val > 0 ? `
-                <div class="flex justify-between items-center text-sm">
-                   <span class="capitalize text-slate-300">${plat}</span>
-                   <span class="font-bold text-white">${formatMoney(val)}</span>
-                </div>
-              ` : '').join('')}
-              ${Object.values(monthData.earningsByPlatform).every(v => v === 0) ? '<p class="text-slate-500 text-sm">Sem dados.</p>' : ''}
-            </div>
-          </div>
-          <div>
-            <h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-700 pb-2">Balanço</h4>
-            <div class="space-y-3 text-sm">
-              <div class="flex justify-between"><span>Entradas Líquidas</span><span class="font-bold text-emerald-400">+${formatMoney(monthData.earningsNet)}</span></div>
-              <div class="flex justify-between"><span>Saídas Totais</span><span class="font-bold text-rose-400">-${formatMoney(totalExpenses)}</span></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderFixed() {
-    return `
-      <nav class="flex gap-2 mb-6 bg-slate-800/50 p-1.5 rounded-xl inline-flex w-full md:w-auto">
-        <button onclick="appData.activeTab='dashboard'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Dashboard</button>
-        <button onclick="appData.activeTab='monthly'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-all">Mensal</button>
-        <button onclick="appData.activeTab='fixed'; renderApp();" class="flex-1 md:flex-none px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow-lg">Fixos</button>
-      </nav>
-
-      <div class="flex flex-col md:flex-row justify-between items-end mb-8">
-        <div>
-            <h2 class="text-3xl font-bold text-white">Gastos Fixos (Semanais)</h2>
-            <p class="text-slate-400 mt-2 max-w-lg">
-                Estes valores são descontados automaticamente do seu saldo toda semana. Adicione aqui aluguel, contas, seguros, etc (divida o valor mensal por 4 se necessário).
-            </p>
-        </div>
-        <div class="mt-4 md:mt-0 text-right">
-             <p class="text-sm text-slate-400 uppercase tracking-wider">Total Semanal</p>
-             <p class="text-4xl font-bold text-white">${formatMoney(Object.values(appData.fixedExpenses).flat().reduce((sum, exp) => sum + exp.value, 0))}</p>
-        </div>
-      </div>
-
-      <div class="bg-slate-800/50 border border-slate-700 rounded-2xl p-6">
-        <div class="flex items-center justify-between mb-6 border-b border-slate-700 pb-4">
-          <h3 class="text-xl font-bold text-white">Categorias</h3>
-          <button onclick="appData.showFixedExpensesEditor=!appData.showFixedExpensesEditor; renderApp();" class="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-6 py-2 transition-colors shadow-lg shadow-blue-500/20">
-            ${appData.showFixedExpensesEditor ? 'Concluir Edição' : '✏️ Editar / Adicionar'}
-          </button>
-        </div>
-
-        ${appData.showFixedExpensesEditor ? renderFixedExpensesEditor() : `
-          <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            ${Object.entries(appData.fixedExpenses).length === 0 ? '<p class="text-slate-500 col-span-3 text-center py-8">Nenhum gasto fixo cadastrado. Clique em Editar para começar.</p>' : ''}
-            ${Object.entries(appData.fixedExpenses).map(([bank, items]) => `
-              <div class="bg-slate-700/30 rounded-xl p-5 border border-slate-700 hover:bg-slate-700/50 transition-colors">
-                <h3 class="font-bold text-lg mb-4 capitalize text-blue-400 flex items-center gap-2">
-                    <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
-                    ${bank}
-                </h3>
-                <div class="space-y-3">
-                  ${items.map(item => `
-                    <div class="flex justify-between items-center text-sm group">
-                      <span class="text-slate-300 group-hover:text-white transition-colors">${item.name}</span>
-                      <span class="font-medium text-white">${formatMoney(item.value)}</span>
-                    </div>
-                  `).join('')}
-                  ${items.length === 0 ? '<p class="text-xs text-slate-500">Vazio</p>' : ''}
-                  <div class="pt-3 mt-2 border-t border-slate-600/50 flex justify-between font-bold text-slate-200">
-                    <span>Total</span>
-                    <span>${formatMoney(items.reduce((s, i) => s + i.value, 0))}</span>
-                  </div>
-                </div>
-              </div>
-            `).join('')}
-          </div>
-        `}
-      </div>
-    `;
-  }
-
-  function renderFixedExpensesEditor() {
-    return `
-      <div class="space-y-6 animate-fade-in">
-        <div class="flex flex-col md:flex-row gap-2 mb-6 bg-slate-700/30 p-4 rounded-xl border border-slate-600">
-            <div class="flex-1">
-                <label class="block text-xs text-slate-400 mb-1">Nova Categoria</label>
-                <div class="flex gap-2">
-                    <input type="text" id="newCategoryInput" placeholder="Ex: Casa, Carro" class="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-blue-500 outline-none">
-                    <button onclick="const name = document.getElementById('newCategoryInput').value; if(name) { appData.fixedExpenses[name] = []; renderApp(); showToast('Categoria criada!', 'success'); }" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg font-bold">Criar</button>
-                </div>
-            </div>
-            <div class="text-xs text-slate-400 md:w-1/3 flex items-center">
-                Crie categorias para agrupar seus gastos fixos (ex: Casa pode conter Aluguel, Luz, Internet).
-            </div>
-        </div>
-
-        ${Object.entries(appData.fixedExpenses).map(([bank, items]) => `
-          <div class="bg-slate-700/50 rounded-xl p-4 border border-slate-600">
-            <div class="flex items-center justify-between mb-4">
-              <h3 class="font-bold capitalize text-blue-400 text-lg">${bank}</h3>
-              <div class="flex gap-2">
-                 <button onclick="appData.fixedExpenses['${bank}'].push({name: 'Novo item', value: 0}); renderApp();" class="text-green-400 hover:text-green-300 text-sm px-2 py-1 bg-green-400/10 rounded">+ Item</button>
-                 <button onclick="window.showConfirm('Remover categoria ${bank}?', () => { delete appData.fixedExpenses['${bank}']; renderApp(); showToast('Categoria removida', 'info'); })" class="text-rose-400 hover:text-rose-300 text-sm px-2 py-1 bg-rose-400/10 rounded">Excluir Categoria</button>
-              </div>
-            </div>
-            <div class="space-y-3" id="${bank}-items">
-              ${items.map((item, idx) => `
-                <div class="flex gap-2 items-center">
-                  <input
-                    type="text"
-                    value="${item.name}"
-                    onchange="appData.fixedExpenses['${bank}'][${idx}].name = this.value"
-                    class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-blue-500 outline-none"
-                    placeholder="Nome"
-                  />
-                  <input
-                    type="number"
-                    step="0.01"
-                    value="${item.value}"
-                    onchange="appData.fixedExpenses['${bank}'][${idx}].value = parseFloat(this.value) || 0"
-                    class="w-24 md:w-32 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-blue-500 outline-none"
-                    placeholder="Valor"
-                  />
-                  <button onclick="appData.fixedExpenses['${bank}'].splice(${idx}, 1); renderApp();" class="text-rose-400 hover:text-rose-300 p-2 rounded hover:bg-rose-400/10">✕</button>
-                </div>
-              `).join('')}
-              ${items.length === 0 ? '<p class="text-sm text-slate-500 italic">Nenhum item nesta categoria.</p>' : ''}
-            </div>
-          </div>
-        `).join('')}
-
-        <div class="fixed bottom-6 right-6 md:relative md:bottom-auto md:right-auto flex gap-3 md:justify-end z-40">
-          <button onclick="updateFixedExpenses(appData.fixedExpenses); appData.showFixedExpensesEditor=false; renderApp();" class="bg-green-600 hover:bg-green-700 text-white rounded-xl px-8 py-3 font-bold shadow-xl shadow-green-500/30 transition-transform hover:scale-105">Salvar Alterações</button>
-        </div>
-        <div class="h-20 md:h-0"></div>
-      </div>
-    `;
-  }
-
-  function renderEarningForm(earning = null) {
-    // Tenta encontrar a plataforma correta pelo ID (novo) ou pelo nome antigo (migração)
-    let platformId = earning?.platformId;
-    if (!platformId && earning?.platform) {
-        // Fallback para dados antigos
-        const found = appData.platforms.find(p => p.name.toLowerCase() === earning.platform.toLowerCase());
-        platformId = found ? found.id : appData.platforms[0]?.id;
-    }
-    
-    // Se ainda não tiver ID e for novo, usa o primeiro da lista
-    if (!platformId && !earning) platformId = appData.platforms[0]?.id;
-
-    const date = earning?.date || new Date().toISOString().split('T')[0];
-    const amount = earning?.amount || '';
-    const received = earning ? earning.received : true;
-
-    return `
-      <div class="bg-slate-700 rounded-xl p-4 mb-4 border-l-4 border-emerald-500 animate-fade-in">
-        <label class="block text-xs text-slate-400 mb-1">Fonte de Renda</label>
-        <div class="flex gap-2 mb-3">
-            <select id="platformId" class="flex-1 bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500">
-            ${appData.platforms.map(p => `<option value="${p.id}" ${platformId === p.id ? 'selected' : ''}>${p.name}</option>`).join('')}
-            </select>
-            <button onclick="appData.showPlatformManager = true; renderApp();" class="bg-slate-600 hover:bg-slate-500 px-3 rounded border border-slate-500 text-sm" title="Gerenciar Fontes">Gerenciar</button>
-        </div>
-        
-        <div class="grid grid-cols-2 gap-3 mb-3">
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Data</label>
-            <input type="date" id="date" value="${date}" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500" />
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Valor Bruto</label>
-            <input type="number" step="0.01" id="amount" value="${amount}" placeholder="0.00" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-emerald-500" />
-          </div>
-        </div>
-        
-        <div class="flex items-center gap-2 mb-4">
-             <input type="checkbox" id="received" ${received ? 'checked' : ''} class="w-4 h-4 rounded border-slate-500 text-emerald-500 focus:ring-emerald-500 bg-slate-600">
-             <label for="received" class="text-sm text-slate-300">Dinheiro já recebido (caiu na conta)</label>
-        </div>
-
-        <div class="flex gap-2">
-          <button onclick="
-            const platformId = document.getElementById('platformId').value;
-            const date = document.getElementById('date').value;
-            const amount = parseFloat(document.getElementById('amount').value);
-            const received = document.getElementById('received').checked;
-            if (platformId && date && amount) {
-              ${earning ? `updateEarning(${earning.id}, {platformId, date, amount, received})` : 'addEarning({platformId, date, amount, received})'};
-            } else {
-                showToast('Preencha todos os campos!', 'error');
-            }
-          " class="flex-1 bg-emerald-600 hover:bg-emerald-700 rounded-lg px-4 py-2 font-bold transition-colors">Salvar</button>
-          <button onclick="appData.${earning ? 'editingEarning' : 'showAddEarning'}=null; renderApp();" class="flex-1 bg-slate-600 hover:bg-slate-500 rounded-lg px-4 py-2 transition-colors">Cancelar</button>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderExpenseForm(expense = null) {
-    const description = expense?.description || '';
-    const date = expense?.date || new Date().toISOString().split('T')[0];
-    const amount = expense?.amount || '';
-
-    return `
-      <div class="bg-slate-700 rounded-xl p-4 mb-4 border-l-4 border-rose-500 animate-fade-in">
-        <label class="block text-xs text-slate-400 mb-1">Descrição</label>
-        <input type="text" id="description" value="${description}" placeholder="Ex: Gasolina, Almoço..." class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 mb-3 text-white outline-none focus:border-rose-500" />
-        
-        <div class="grid grid-cols-2 gap-3 mb-3">
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Data</label>
-            <input type="date" id="date" value="${date}" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-rose-500" />
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Valor</label>
-            <input type="number" step="0.01" id="amount" value="${amount}" placeholder="0.00" class="w-full bg-slate-600 border border-slate-500 rounded px-3 py-2 text-white outline-none focus:border-rose-500" />
-          </div>
-        </div>
-
-        <div class="flex gap-2">
-          <button onclick="
-            const description = document.getElementById('description').value;
-            const date = document.getElementById('date').value;
-            const amount = parseFloat(document.getElementById('amount').value);
-            if (description && date && amount) {
-              ${expense ? `updateExpense(${expense.id}, {description, date, amount, week: appData.selectedWeek})` : 'addExpense({description, date, amount, week: appData.selectedWeek})'};
-            } else {
-                showToast('Preencha todos os campos!', 'error');
-            }
-          " class="flex-1 bg-rose-600 hover:bg-rose-700 rounded-lg px-4 py-2 font-bold transition-colors">Salvar</button>
-          <button onclick="appData.${expense ? 'editingExpense' : 'showAddExpense'}=null; renderApp();" class="flex-1 bg-slate-600 hover:bg-slate-500 rounded-lg px-4 py-2 transition-colors">Cancelar</button>
-        </div>
-      </div>
-    `;
-  }
-</script>
 
 <style>
   /* Custom Scrollbar for list areas */
