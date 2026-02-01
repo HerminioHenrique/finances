@@ -1348,9 +1348,53 @@
         if (expenseMonth === monthKey) monthData.expensesVariable += expense.amount;
         });
 
-        monthData.weeks.forEach(week => {
-        monthData.expensesFixed += getTotalFixedExpenses(week);
-        });
+        // --- INÍCIO DA CORREÇÃO: CÁLCULO PROPORCIONAL DE GASTOS FIXOS ---
+        // Em vez de somar a semana cheia, calculamos o custo por dia e multiplicamos pelos dias que caem no mês.
+        
+        // 1. Pega o dia 1 do mês selecionado
+        const startOfMonth = new Date(appData.selectedYear, appData.selectedMonth - 1, 1);
+        
+        // 2. Acha a segunda-feira da semana onde o mês começa
+        const firstWeekStr = getWeekFromDate(toLocalISO(startOfMonth));
+        const firstWeekParts = firstWeekStr.split('-');
+        let currentCalcDate = new Date(firstWeekParts[0], firstWeekParts[1] - 1, firstWeekParts[2]);
+        
+        let safetyLoop = 0;
+        // Percorre as semanas do calendário (máximo 6 semanas cobrem qualquer mês)
+        while(safetyLoop < 6) {
+            const currentWeekStr = toLocalISO(currentCalcDate);
+            const weekTotal = getTotalFixedExpenses(currentWeekStr);
+            const dailyCost = weekTotal / 7; // Custo por dia daquela semana específica
+            
+            let daysInMonthCount = 0;
+            
+            // Verifica os 7 dias desta semana
+            for(let i=0; i<7; i++) {
+                const dayCheck = new Date(currentCalcDate);
+                dayCheck.setDate(dayCheck.getDate() + i);
+                
+                // Se o dia pertence ao mês e ano selecionados
+                if (dayCheck.getMonth() + 1 === appData.selectedMonth && 
+                    dayCheck.getFullYear() === appData.selectedYear) {
+                    daysInMonthCount++;
+                }
+            }
+            
+            // Adiciona apenas o custo proporcional aos dias que caem neste mês
+            if (daysInMonthCount > 0) {
+                monthData.expensesFixed += (dailyCost * daysInMonthCount);
+            }
+            
+            // Se processamos uma semana e nenhum dia dela caiu no mês, e já passamos da primeira iteração, acabaram as semanas do mês.
+            if (daysInMonthCount === 0 && safetyLoop > 0) {
+                break;
+            }
+            
+            // Avança para a próxima semana
+            currentCalcDate.setDate(currentCalcDate.getDate() + 7);
+            safetyLoop++;
+        }
+        // --- FIM DA CORREÇÃO ---
         
         const totalExpenses = monthData.expensesVariable + monthData.expensesFixed;
         const balance = monthData.earningsNet - totalExpenses;
@@ -1409,7 +1453,7 @@
                 <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesVariable)}</p>
             </div>
             <div class="bg-purple-900/20 border border-purple-500/20 rounded-xl p-4">
-                <p class="text-xs text-purple-400 font-bold uppercase mb-1">Fixos</p>
+                <p class="text-xs text-purple-400 font-bold uppercase mb-1">Fixos (Prop.)</p>
                 <p class="text-xl font-bold text-white">${formatMoney(monthData.expensesFixed)}</p>
             </div>
             </div>
