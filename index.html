@@ -1359,6 +1359,9 @@
         const firstWeekParts = firstWeekStr.split('-');
         let currentCalcDate = new Date(firstWeekParts[0], firstWeekParts[1] - 1, firstWeekParts[2]);
         
+        // NOVO: Array para guardar as semanas deste mês para o gráfico semanal
+        const weeksOfThisMonth = [];
+
         let safetyLoop = 0;
         // Percorre as semanas do calendário (máximo 6 semanas cobrem qualquer mês)
         while(safetyLoop < 6) {
@@ -1367,7 +1370,8 @@
             const dailyCost = weekTotal / 7; // Custo por dia daquela semana específica
             
             let daysInMonthCount = 0;
-            
+            let weekBelongsToMonth = false; // Flag para o gráfico semanal
+
             // Verifica os 7 dias desta semana
             for(let i=0; i<7; i++) {
                 const dayCheck = new Date(currentCalcDate);
@@ -1378,11 +1382,24 @@
                     dayCheck.getFullYear() === appData.selectedYear) {
                     daysInMonthCount++;
                 }
+
+                // Regra do gráfico semanal: A semana pertence ao mês onde está a sua SEGUNDA-FEIRA.
+                if (i === 0) { // Segunda-feira
+                    if (dayCheck.getMonth() + 1 === appData.selectedMonth && 
+                        dayCheck.getFullYear() === appData.selectedYear) {
+                        weekBelongsToMonth = true;
+                    }
+                }
             }
             
-            // Adiciona apenas o custo proporcional aos dias que caem neste mês
+            // Adiciona apenas o custo proporcional aos dias que caem neste mês (Cálculo Financeiro Mensal)
             if (daysInMonthCount > 0) {
                 monthData.expensesFixed += (dailyCost * daysInMonthCount);
+            }
+
+            // Adiciona a semana ao gráfico se a segunda-feira cair neste mês
+            if (weekBelongsToMonth) {
+                weeksOfThisMonth.push(currentWeekStr);
             }
             
             // Se processamos uma semana e nenhum dia dela caiu no mês, e já passamos da primeira iteração, acabaram as semanas do mês.
@@ -1395,6 +1412,69 @@
             safetyLoop++;
         }
         // --- FIM DA CORREÇÃO ---
+
+        // --- CÁLCULO E HTML DO GRÁFICO SEMANAL ---
+        let bestWeek = { idx: -1, val: -Infinity };
+        let worstWeek = { idx: -1, val: Infinity };
+        let maxAbsVal = 0;
+
+        const weeklyChartData = weeksOfThisMonth.map((weekStart, idx) => {
+            // Net Earnings da semana
+            const weekEarnings = appData.earnings
+                .filter(e => getWeekFromDate(e.date) === weekStart)
+                .reduce((sum, e) => sum + calculateNetEarning(e.amount, e.platformId), 0);
+
+            // Variable Expenses da semana
+            const weekVarExpenses = appData.expenses
+                .filter(e => e.week === weekStart)
+                .reduce((sum, e) => sum + e.amount, 0);
+            
+            // Fixed Expenses da semana (Valor cheio da semana, pois é visão semanal)
+            const weekFixed = getTotalFixedExpenses(weekStart);
+
+            const balance = weekEarnings - weekVarExpenses - weekFixed;
+            
+            if (balance > bestWeek.val) bestWeek = { idx, val: balance };
+            if (balance < worstWeek.val) worstWeek = { idx, val: balance };
+            if (Math.abs(balance) > maxAbsVal) maxAbsVal = Math.abs(balance);
+
+            return { weekStart, balance };
+        });
+
+        const weeklyBalanceChartHTML = weeklyChartData.length > 0 ? `
+            <div class="bg-slate-800/50 border border-slate-700 rounded-xl p-6 mb-8">
+                <h3 class="text-sm font-bold text-slate-300 uppercase tracking-wider mb-6">Saldo Semanal</h3>
+                <div class="space-y-4">
+                    ${weeklyChartData.map((data, idx) => {
+                        const isBest = idx === bestWeek.idx;
+                        const isWorst = idx === worstWeek.idx;
+                        // Evita divisão por zero e garante um mínimo visual
+                        const width = maxAbsVal > 0 ? (Math.abs(data.balance) / maxAbsVal) * 100 : 0;
+                        const colorClass = data.balance >= 0 ? 'bg-emerald-500' : 'bg-rose-500';
+                        const textClass = data.balance >= 0 ? 'text-emerald-400' : 'text-rose-400';
+                        
+                        // Formata data dd/mm
+                        const parts = data.weekStart.split('-');
+                        const dateLabel = `${parts[2]}/${parts[1]}`;
+                        
+                        return `
+                        <div class="relative">
+                            <div class="flex justify-between text-xs mb-1">
+                                <span class="text-slate-400 font-mono">Semana ${dateLabel}</span>
+                                <span class="${textClass} font-bold flex items-center gap-1">
+                                    ${isBest ? '🏆 ' : ''}${isWorst ? '⚠️ ' : ''}
+                                    ${formatMoney(data.balance)}
+                                </span>
+                            </div>
+                            <div class="h-3 w-full bg-slate-700/50 rounded-full overflow-hidden flex ${data.balance < 0 ? 'justify-end' : 'justify-start'}">
+                                <div class="h-full ${colorClass} rounded-full" style="width: ${Math.max(width, 1)}%; opacity: ${isBest || isWorst ? '1' : '0.7'}"></div>
+                            </div>
+                        </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        ` : '';
         
         const totalExpenses = monthData.expensesVariable + monthData.expensesFixed;
         const balance = monthData.earningsNet - totalExpenses;
@@ -1458,7 +1538,10 @@
             </div>
             </div>
             
-            <!-- Monthly Aggregation Chart -->
+            <!-- NOVO: Gráfico Semanal -->
+            ${weeklyBalanceChartHTML}
+
+            <!-- Monthly Aggregation Chart (Existing) -->
             ${renderDayChart(monthDayAggregation, 'month')}
 
             <div class="grid md:grid-cols-2 gap-6">
