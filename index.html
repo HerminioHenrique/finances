@@ -192,26 +192,30 @@
             title.textContent = `Resumo de todas as ${days[dayIndex]}s`;
         }
 
-        total = relevantEarnings.reduce((sum, e) => sum + e.amount, 0);
+        total = relevantEarnings.reduce((sum, e) => sum + calculateNetEarning(e.amount, e.platformId), 0);
 
         if (relevantEarnings.length === 0) {
             listContainer.innerHTML = '<p class="text-slate-500 text-center py-4">Sem registros neste dia.</p>';
         } else {
             listContainer.innerHTML = `
                 <div class="mb-4 text-center">
-                    <p class="text-xs text-slate-400 uppercase">Total do Dia</p>
+                    <p class="text-xs text-slate-400 uppercase">Total Líquido do Dia</p>
                     <p class="text-2xl font-bold text-emerald-400">${formatMoney(total)}</p>
                 </div>
                 <div class="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-1">
-                    ${relevantEarnings.sort((a,b) => b.amount - a.amount).map(e => {
+                    ${relevantEarnings.sort((a,b) => calculateNetEarning(b.amount, b.platformId) - calculateNetEarning(a.amount, a.platformId)).map(e => {
                          const platform = getPlatform(e.platformId);
+                         const netAmount = calculateNetEarning(e.amount, e.platformId);
                          return `
                             <div class="bg-slate-700/50 p-3 rounded-lg flex justify-between items-center border border-slate-600">
                                 <div>
                                     <p class="font-bold text-white text-sm">${platform.name}</p>
                                     <p class="text-xs text-slate-400">${new Date(e.date).toLocaleDateString('pt-BR')}</p>
                                 </div>
-                                <span class="font-bold text-emerald-400">${formatMoney(e.amount)}</span>
+                                <div class="text-right">
+                                    <p class="font-bold text-emerald-400">${formatMoney(netAmount)}</p>
+                                    ${platform.type !== 'none' ? `<p class="text-[10px] text-slate-500 line-through">${formatMoney(e.amount)}</p>` : ''}
+                                </div>
                             </div>
                          `;
                     }).join('')}
@@ -988,7 +992,7 @@
         appData.earnings.filter(e => getWeekFromDate(e.date) === appData.selectedWeek).forEach(e => {
             let jsDay = new Date(e.date).getDay(); 
             let chartIdx = jsDay === 0 ? 6 : jsDay - 1; 
-            weeklyChartData[chartIdx] += e.amount;
+            weeklyChartData[chartIdx] += calculateNetEarning(e.amount, e.platformId);
         });
 
         const hasData = appData.earnings.length > 0 || appData.expenses.length > 0;
@@ -1324,8 +1328,7 @@
             
             let jsDay = new Date(earning.date).getDay();
             let chartIdx = jsDay === 0 ? 6 : jsDay - 1;
-            monthDayAggregation[chartIdx] += earning.amount;
-
+            
             let platformId = earning.platformId;
             if (!platformId && earning.platform) {
                 const found = appData.platforms.find(p => p.name.toLowerCase() === earning.platform.toLowerCase());
@@ -1334,6 +1337,8 @@
             if (!platformId) platformId = appData.platforms[0]?.id;
 
             const net = calculateNetEarning(earning.amount, platformId);
+            monthDayAggregation[chartIdx] += net;
+
             monthData.earningsNet += net;
             
             const pName = getPlatform(platformId).name;
