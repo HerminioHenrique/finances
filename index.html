@@ -637,6 +637,55 @@
         }
     };
 
+    window.markAllEarningsAsReceived = async (platformId = null, scope = 'week', specificWeek = null) => {
+        const pending = appData.earnings.filter(e => {
+            const isPending = e.received === false;
+            const matchesPlatform = platformId ? e.platformId === platformId : true;
+            
+            let matchesScope = false;
+            if (scope === 'week') {
+                matchesScope = getWeekFromDate(e.date) === (specificWeek || appData.selectedWeek);
+            } else if (scope === 'global') {
+                matchesScope = true;
+            } else if (scope === 'previous') {
+                matchesScope = getWeekFromDate(e.date) < appData.selectedWeek;
+            }
+            
+            return isPending && matchesPlatform && matchesScope;
+        });
+
+        if (pending.length === 0) return;
+        
+        const platformName = platformId ? getPlatform(platformId).name : 'todas as fontes';
+        let scopeText = '';
+        const targetWeek = specificWeek || appData.selectedWeek;
+        const weekLabel = getWeekLabel(targetWeek);
+
+        if (scope === 'week') {
+            scopeText = `as ${pending.length} entradas de "${platformName}" da ${weekLabel}`;
+        } else if (scope === 'global') {
+            scopeText = `todas as ${pending.length} entradas de "${platformName}" (todas as semanas)`;
+        } else if (scope === 'previous') {
+            scopeText = `as ${pending.length} entradas de "${platformName}" de semanas anteriores`;
+        }
+        
+        window.showConfirm(`Marcar ${scopeText} como recebidas?`, async () => {
+            try {
+                // Optimistic update
+                pending.forEach(e => e.received = true);
+                renderApp();
+                
+                showToast('Sincronizando...', 'info');
+                const promises = pending.map(e => window.syncEarning(e));
+                await Promise.all(promises);
+                showToast('Entradas marcadas como recebidas!', 'success');
+            } catch (error) {
+                showToast('Erro ao sincronizar: ' + error.message, 'error');
+                loadAllData();
+            }
+        });
+    };
+
     window.deleteEarning = async (id) => {
         window.showConfirm('Tem certeza que deseja deletar esta entrada?', async () => {
             appData.earnings = appData.earnings.filter(e => e.id !== id);
@@ -1200,12 +1249,119 @@
                 <span class="w-2 h-6 bg-emerald-500 rounded-full"></span>
                 Entradas
                 </h2>
-                <button onclick="appData.showAddEarning=!appData.showAddEarning; renderApp();" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-bold transition-colors">
-                + Novo
-                </button>
+                <div class="flex flex-wrap justify-end gap-2">
+                    ${(() => {
+                        const weekPending = appData.earnings.filter(e => getWeekFromDate(e.date) === appData.selectedWeek && e.received === false);
+                        const weekPendingByPlatform = {};
+                        weekPending.forEach(e => {
+                            weekPendingByPlatform[e.platformId] = (weekPendingByPlatform[e.platformId] || 0) + 1;
+                        });
+
+                        const globalPendingByPlatform = {};
+                        appData.earnings.filter(e => e.received === false).forEach(e => {
+                            globalPendingByPlatform[e.platformId] = (globalPendingByPlatform[e.platformId] || 0) + 1;
+                        });
+
+                        let buttons = '';
+                        
+                        // Button for current week (all platforms)
+                        if (weekPending.length > 1 && Object.keys(weekPendingByPlatform).length > 1) {
+                            buttons += `
+                                <button onclick="markAllEarningsAsReceived(null, 'week')" class="bg-yellow-600/20 hover:bg-yellow-600/40 text-yellow-400 border border-yellow-500/30 rounded-lg px-3 py-2 text-xs font-bold transition-all flex items-center gap-1" title="Receber todas as pendentes desta semana">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                                    Semana
+                                </button>
+                            `;
+                        }
+
+                        // Buttons for platforms with >1 pending entry in the CURRENT week
+                        Object.entries(weekPendingByPlatform).forEach(([pId, count]) => {
+                            if (count > 1) {
+                                const p = getPlatform(pId);
+                                buttons += `
+                                    <button onclick="markAllEarningsAsReceived('${pId}', 'week')" class="bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border border-emerald-500/30 rounded-lg px-3 py-2 text-xs font-bold transition-all flex items-center gap-1" title="Receber todas as pendentes de ${p.name} desta semana">
+                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                        ${p.name}
+                                    </button>
+                                `;
+                            }
+                        });
+
+                        // Buttons for platforms with >1 pending entry GLOBALLY (only if not already shown for the week)
+                        Object.entries(globalPendingByPlatform).forEach(([pId, count]) => {
+                            if (count > 1 && !weekPendingByPlatform[pId]) {
+                                const p = getPlatform(pId);
+                                buttons += `
+                                    <button onclick="markAllEarningsAsReceived('${pId}', 'global')" class="bg-slate-600/20 hover:bg-slate-600/40 text-slate-400 border border-slate-500/30 rounded-lg px-3 py-2 text-xs font-bold transition-all flex items-center gap-1" title="Receber todas as pendentes de ${p.name} (todas as semanas)">
+                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                        Tudo ${p.name}
+                                    </button>
+                                `;
+                            }
+                        });
+
+                        return buttons;
+                    })()}
+                    <button onclick="appData.showAddEarning=!appData.showAddEarning; renderApp();" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-bold transition-colors">
+                    + Novo
+                    </button>
+                </div>
             </div>
             
             ${appData.showAddEarning ? renderEarningForm() : ''}
+
+            ${(() => {
+                const previousPending = appData.earnings.filter(e => getWeekFromDate(e.date) < appData.selectedWeek && e.received === false);
+                if (previousPending.length === 0) return '';
+                
+                // Group by week
+                const pendingByWeek = {};
+                previousPending.forEach(e => {
+                    const week = getWeekFromDate(e.date);
+                    if (!pendingByWeek[week]) pendingByWeek[week] = {};
+                    pendingByWeek[week][e.platformId] = (pendingByWeek[week][e.platformId] || 0) + 1;
+                });
+
+                // Sort weeks descending
+                const sortedWeeks = Object.keys(pendingByWeek).sort((a, b) => b.localeCompare(a));
+
+                return `
+                <div class="mb-6 bg-yellow-500/5 border border-yellow-500/20 rounded-xl p-4 animate-fade-in">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-xs font-bold text-yellow-400 uppercase tracking-widest flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            Pendentes de Semanas Anteriores
+                        </h3>
+                        <span class="bg-yellow-500 text-slate-900 text-[10px] font-black px-1.5 py-0.5 rounded-full">${previousPending.length}</span>
+                    </div>
+                    
+                    <div class="space-y-4">
+                        ${sortedWeeks.map(week => {
+                            const platforms = pendingByWeek[week];
+                            return `
+                                <div class="border-l-2 border-yellow-500/30 pl-3 py-1">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <p class="text-[10px] font-bold text-slate-400 uppercase">${getWeekLabel(week)}</p>
+                                        <button onclick="markAllEarningsAsReceived(null, 'week', '${week}')" class="text-[9px] font-bold text-yellow-500/60 hover:text-yellow-500 transition-colors">Receber Tudo</button>
+                                    </div>
+                                    <div class="flex flex-wrap gap-2">
+                                        ${Object.entries(platforms).map(([pId, count]) => {
+                                            const p = getPlatform(pId);
+                                            return `
+                                                <button onclick="markAllEarningsAsReceived('${pId}', 'week', '${week}')" class="bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded-lg px-2.5 py-1.5 text-[10px] font-bold text-white flex items-center gap-2 transition-all">
+                                                    <span>${p.name}: ${count}</span>
+                                                    <span class="text-emerald-400">Receber</span>
+                                                </button>
+                                            `;
+                                        }).join('')}
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+                `;
+            })()}
             
             <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
                 ${appData.earnings
