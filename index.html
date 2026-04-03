@@ -1310,6 +1310,40 @@
             
             ${appData.showAddEarning ? renderEarningForm() : ''}
 
+            <!-- Earnings Summary by Platform -->
+            ${(() => {
+                const weekEarnings = appData.earnings.filter(e => getWeekFromDate(e.date) === appData.selectedWeek);
+                if (weekEarnings.length === 0) return '';
+                
+                const platformTotals = {};
+                weekEarnings.forEach(e => {
+                    const net = calculateNetEarning(e.amount, e.platformId);
+                    platformTotals[e.platformId] = (platformTotals[e.platformId] || 0) + net;
+                });
+
+                const sortedPlatforms = Object.entries(platformTotals).sort((a, b) => b[1] - a[1]);
+
+                return `
+                <div class="mb-6 bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-4 animate-fade-in">
+                    <h3 class="text-[10px] font-bold text-emerald-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+                        Resumo Líquido por Plataforma
+                    </h3>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        ${sortedPlatforms.map(([pId, total]) => {
+                            const p = getPlatform(pId);
+                            return `
+                                <div class="bg-slate-900/50 rounded-lg p-2 border border-slate-700/50">
+                                    <p class="text-[10px] text-slate-500 truncate mb-0.5">${p.name}</p>
+                                    <p class="text-sm font-bold text-emerald-400">${formatMoney(total)}</p>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+                `;
+            })()}
+
             ${(() => {
                 const previousPending = appData.earnings.filter(e => getWeekFromDate(e.date) < appData.selectedWeek && e.received === false);
                 if (previousPending.length === 0) return '';
