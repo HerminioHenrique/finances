@@ -1421,7 +1421,7 @@
                 `;
             })()}
             
-            <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
+            <div id="earningsList" class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
                 ${appData.earnings
                 .filter(e => getWeekFromDate(e.date) === appData.selectedWeek)
                 .sort((a, b) => new Date(b.date) - new Date(a.date))
@@ -1474,7 +1474,7 @@
 
             ${appData.showAddExpense ? renderExpenseForm() : ''}
 
-            <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
+            <div id="expensesList" class="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
                 ${appData.expenses
                 .filter(e => e.week === appData.selectedWeek)
                 .sort((a, b) => new Date(b.date) - new Date(a.date))
@@ -2057,9 +2057,18 @@
         const modalContainer = document.getElementById('platformManagerModal');
         if (!content) return;
 
+        // Preserve scroll positions
         let fixedScroll = 0;
         const fixedList = document.getElementById('fixedExpensesList');
         if (fixedList) fixedScroll = fixedList.scrollTop;
+
+        let earningsScroll = 0;
+        const earningsList = document.getElementById('earningsList');
+        if (earningsList) earningsScroll = earningsList.scrollTop;
+
+        let expensesScroll = 0;
+        const expensesList = document.getElementById('expensesList');
+        if (expensesList) expensesScroll = expensesList.scrollTop;
 
         let mainContent = '';
         if (appData.activeTab === 'dashboard') {
@@ -2072,9 +2081,20 @@
 
         content.innerHTML = mainContent + renderSettingsModal() + renderTutorialOverlay();
         
+        // Restore scroll positions
         const newFixedList = document.getElementById('fixedExpensesList');
         if (newFixedList && appData.activeTab === 'dashboard') {
             newFixedList.scrollTop = fixedScroll;
+        }
+
+        const newEarningsList = document.getElementById('earningsList');
+        if (newEarningsList) {
+            newEarningsList.scrollTop = earningsScroll;
+        }
+
+        const newExpensesList = document.getElementById('expensesList');
+        if (newExpensesList) {
+            newExpensesList.scrollTop = expensesScroll;
         }
         
         if(appData.showPlatformManager) {
