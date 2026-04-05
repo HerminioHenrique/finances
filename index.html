@@ -281,10 +281,11 @@
     window.prepareFixedExpensesList = () => {
         const weekData = appData.weeklyFixedExpenses[appData.selectedWeek] || { paidItems: [] };
         const paidItems = weekData.paidItems || [];
+        const snapshot = weekData.snapshot || appData.fixedExpenses;
 
         let allItems = [];
-        if (appData.fixedExpenses) {
-             Object.entries(appData.fixedExpenses).forEach(([cat, items]) => {
+        if (snapshot) {
+             Object.entries(snapshot).forEach(([cat, items]) => {
                 items.forEach(item => {
                     allItems.push({ cat, ...item });
                 });
@@ -298,8 +299,8 @@
             const isPaidA = paidItems.includes(idA);
             const isPaidB = paidItems.includes(idB);
 
-            if (isPaidA === isPaidB) return 0; // Mantém ordem original relativa
-            return isPaidA ? 1 : -1; // Pagos vão pro final
+            if (isPaidA === isPaidB) return 0; 
+            return isPaidA ? 1 : -1; 
         });
 
         appData.cachedFixedExpensesList = allItems;
@@ -324,14 +325,16 @@
     }
 
     function getTotalFixedExpenses(weekStart) {
-        if (appData.weeklyFixedExpenses[weekStart] && appData.weeklyFixedExpenses[weekStart].total !== undefined) {
-        return appData.weeklyFixedExpenses[weekStart].total;
+        const weekData = appData.weeklyFixedExpenses[weekStart];
+        if (weekData && weekData.total !== undefined) {
+            return weekData.total;
         }
 
-        const overrides = appData.weeklyFixedExpenses[weekStart]?.itemOverrides || {};
+        const snapshot = weekData?.snapshot || appData.fixedExpenses;
+        const overrides = weekData?.itemOverrides || {};
         let total = 0;
         
-        Object.entries(appData.fixedExpenses).forEach(([cat, items]) => {
+        Object.entries(snapshot).forEach(([cat, items]) => {
             items.forEach(item => {
                 const key = `${cat}:${item.name}`;
                 if (overrides[key] !== undefined) {
@@ -349,10 +352,11 @@
         const weekData = appData.weeklyFixedExpenses[weekStart];
         if (!weekData || !weekData.paidItems) return 0;
 
+        const snapshot = weekData.snapshot || appData.fixedExpenses;
         const overrides = weekData.itemOverrides || {};
         let totalPaid = 0;
         
-        Object.entries(appData.fixedExpenses).forEach(([cat, items]) => {
+        Object.entries(snapshot).forEach(([cat, items]) => {
             items.forEach(item => {
                 const id = `${cat}:${item.name}`;
                 if (weekData.paidItems.includes(id)) {
@@ -554,12 +558,22 @@
       await deleteDoc(doc(db, `users/${currentUser.uid}/${collection_name}`, id));
     }
 
-    window.changeCurrency = async (newCurrency) => {
-        appData.currency = newCurrency;
-        appData.showSettings = false;
-        await window.syncPreferences();
-        renderApp();
-        showToast('Moeda alterada com sucesso!', 'success');
+    window.migratePastWeeksToSnapshots = async () => {
+        let changed = false;
+        const currentFixed = JSON.parse(JSON.stringify(appData.fixedExpenses));
+        
+        for (const [week, data] of Object.entries(appData.weeklyFixedExpenses)) {
+            // Se a semana tem atividade (pagos ou overrides) mas não tem snapshot
+            const hasActivity = (data.paidItems && data.paidItems.length > 0) || (data.itemOverrides && Object.keys(data.itemOverrides).length > 0);
+            if (hasActivity && !data.snapshot && !data.total) {
+                data.snapshot = currentFixed;
+                await window.syncWeeklyFixedExpense(week, data);
+                changed = true;
+            }
+        }
+        if (changed) {
+            console.log("Migração de snapshots concluída.");
+        }
     };
 
     window.savePlatform = async (id, name, type, value) => {
@@ -759,6 +773,11 @@
             appData.weeklyFixedExpenses[week] = { paidItems: [], itemOverrides: {} };
         }
         
+        // Se não tem snapshot, cria um agora para "congelar" os valores desta semana
+        if (!appData.weeklyFixedExpenses[week].snapshot && !appData.weeklyFixedExpenses[week].total) {
+            appData.weeklyFixedExpenses[week].snapshot = JSON.parse(JSON.stringify(appData.fixedExpenses));
+        }
+
         const list = appData.weeklyFixedExpenses[week].paidItems || [];
         if (list.includes(id)) {
             appData.weeklyFixedExpenses[week].paidItems = list.filter(i => i !== id);
@@ -782,6 +801,11 @@
             }
             if (!appData.weeklyFixedExpenses[week].itemOverrides) {
                 appData.weeklyFixedExpenses[week].itemOverrides = {};
+            }
+
+            // Se não tem snapshot, cria um agora para "congelar" os valores desta semana
+            if (!appData.weeklyFixedExpenses[week].snapshot && !appData.weeklyFixedExpenses[week].total) {
+                appData.weeklyFixedExpenses[week].snapshot = JSON.parse(JSON.stringify(appData.fixedExpenses));
             }
             
             appData.weeklyFixedExpenses[week].itemOverrides[id] = newValue;
@@ -2004,6 +2028,9 @@
       if (goalSnap.exists()) {
         window.appData.weekGoal = goalSnap.data().value;
       }
+
+      // Migra semanas passadas para snapshots para evitar que mudanças futuras as afetem
+      await window.migratePastWeeksToSnapshots();
 
       window.prepareFixedExpensesList();
       window.renderApp();
