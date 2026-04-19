@@ -10,7 +10,7 @@
 
 Um aplicativo web de **página única (SPA)** para controle de finanças pessoais, criado especificamente para quem tem uma renda **não convencional** — como trabalhadores autônomos, freelancers, criadores de conteúdo, prestadores de serviço por plataforma, ou qualquer pessoa cujos ganhos variam semana a semana e vêm de múltiplas fontes.
 
-Desenvolvido com o auxílio do **Google AI Studio**, o app roda diretamente no navegador e usa o **Firebase** como backend para autenticação e armazenamento de dados em tempo real.
+Desenvolvido com o **Google AI Studio**, o app roda diretamente no navegador e usa o **Firebase** como backend para autenticação e armazenamento de dados em tempo real.
 
 ---
 
